@@ -68,7 +68,7 @@ pnpm check:docs
 pnpm benchmark
 ```
 
-Harness 集成测试消费构建产物，先运行 build。领域测试使用真实 SQLite，Gateway 测试使用公开 Cordis/Typert 服务。浏览器和真实模型验证证据见 [实施记录](docs/implementation/status.md)，未执行的验证不会标为通过。
+Harness 集成测试消费构建产物，`pnpm test` 的 pretest 自动执行 build。领域测试使用真实 SQLite，Gateway 测试使用公开 Cordis/Typert 服务。浏览器和真实模型验证证据见 [实施记录](docs/implementation/status.md)，未执行的验证不会标为通过。
 
 设计入口：[文档导航](docs/README.md)。公共契约在 `src/shared`，领域在 `src/domain`，SQLite 在 `src/storage`，宿主适配在 `src/index.ts`，工作台在 `src/client`。
 

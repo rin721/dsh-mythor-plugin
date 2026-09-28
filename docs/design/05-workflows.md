@@ -24,7 +24,7 @@ plan 流程在 simulate 后进入 review；check 流程以诊断结束，作者�
 
 ## 上下文与记忆
 
-ContextPack 包含 projectId、revision、focus、perspective、time、查询结果、来源和截断说明。检索顺序：固定创作约束 → 焦点对象 → 相关事件与关系 → 人物知识 → 最近正文 → 全文补充。按字符预算裁剪可选材料，保留规则、ID、证据和缺口提示。
+ContextPack 包含 projectId、revision、focus、perspective、time、查询结果、来源和截断说明。检索顺序：固定创作约束 → 焦点对象 → 相关事件与关系 → 人物知识 → 最近正文 → 全文补充。按字符预算裁剪材料，优先保留规则及对象证据；预算不足时明确报告缺口，不能把未加载的规则视为不存在。ID、边界元数据和截断说明计入预算。
 
 长期事实来自项目数据库；阶段工作记忆来自 WorkflowRun；知识材料保留原始来源；经验总结必须带适用条件及支持案例，作为可撤销建议，不自动改动 Canon。首版不依赖 embedding。
 

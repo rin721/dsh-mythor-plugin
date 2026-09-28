@@ -17,8 +17,8 @@
 
 - `pnpm typecheck`：通过，开启 strict / noUnusedLocals / noUnusedParameters。
 - `pnpm test`：25 项通过；测试前自动构建，Harness 测试使用构建产物。
-- `pnpm check:docs`：检查相对 Markdown 链接。
-- `pnpm format:check`：工程格式检查。
+- `pnpm check:docs`：通过，检查 14 个 Markdown 文件中的相对链接。
+- `pnpm format:check`：通过，工程格式检查。
 - `pnpm pack`：包含 Host、Worker、Client、类型声明、patch、图标、locale、README 与设计文档。
 - `.github/workflows/ci.yml`：配置 Node 24、Windows/Ubuntu 构建和测试；本地只实际运行了 Windows，尚无远端 CI 结果。
 
@@ -37,6 +37,8 @@
 实际走通：创建项目 → 新建林烬人物候选 → 检查与接受 → 导入两个 Markdown 章节并预览拆分 → 接受原文 → 在 CodeMirror 中读取第一章 → 创建顾清 → 创建人物关系 → 图谱聚焦及路径追踪 → 查看 v1–v4 提交历史 → 恢复导入提取任务创建 Harness 会话 → 取消任务。测试小说仅是自建验收数据。
 
 集成过程中发现并修正：Client 需在 remote.mythor 注入作用域调用；Harness RemoteResult 与业务 ApiResult 需要分别解包。只测试直接 Gateway 无法发现这两个 Client 问题，因此保留真实宿主 smoke 为发布要求。
+
+发布包复验：按锁文件重新安装依赖，重新打包并通过官方 CLI 安装 tgz；重启隔离宿主后读取原有 v4 项目，人物关系聚焦与路径追踪正常。恢复原提取任务时，宿主因没有模型配置而报告 prompt variable model 缺值；Mythor 将该异步错误持久化为 read / failed，任务详情可读取。此次重新连接后未观察到新增浏览器控制台错误。截图保存在本地忽略目录 `.test-output/mythor-workbench.png`，不随发布包分发。
 
 ## 长篇数据层基准
 
