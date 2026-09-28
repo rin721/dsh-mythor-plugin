@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import {
   EntitySchema,
   KINDS,
@@ -14,11 +14,36 @@ import {
   type Request,
   type Snapshot,
 } from '../shared/contracts.ts'
-import { Modal, StoryGraph, TextEditor, findPath } from './components.tsx'
+import { StoryGraph, TextEditor, findPath } from './components.tsx'
 import type { Lane, Visit } from '../domain/projections.ts'
-import { style } from './style.ts'
+import { cx } from './layout.ts'
+import { mountStyles } from './styles.ts'
+import {
+  Feedback,
+  FeedbackScope,
+  TextDiff,
+  Tag,
+  Button,
+  Select,
+  SelectOption,
+  Field,
+  FilePicker,
+  Panel,
+  LoadingState,
+  Input,
+  EmptyState,
+  Disclosure,
+  Pill,
+  NumberField,
+  Checkbox,
+  JsonView,
+  ErrorState,
+  Modal,
+  SourceText,
+  FormActions,
+  TextArea,
+} from './ui/index.tsx'
 import { zh, type Key, type Translate } from './locales.ts'
-
 export type Api = (request: Request) => Promise<ApiResult>
 const uid = () => crypto.randomUUID()
 const json = (v: unknown): Json => JSON.parse(JSON.stringify(v)) as Json
@@ -111,8 +136,8 @@ const fields: Partial<Record<Entity['kind'], [string, Key][]>> = {
     ['relationKind', 'field_rule_relationKind'],
   ],
 }
-
 export function App({ api, t = (k: Key) => zh[k] }: { api: Api; t?: Translate }) {
+  useLayoutEffect(mountStyles, [])
   const [projects, setProjects] = useState<Project[]>([])
   const [projectId, setProjectId] = useState('')
   const currentProject = useRef(projectId)
@@ -134,14 +159,24 @@ export function App({ api, t = (k: Key) => zh[k] }: { api: Api; t?: Translate })
     | undefined
   >()
   const [selected, setSelected] = useState('')
-  const [evidence, setEvidence] = useState<{ document: Document; start: number; end: number }>()
+  const [evidence, setEvidence] = useState<{
+    document: Document
+    start: number
+    end: number
+  }>()
   const [editEntity, setEditEntity] = useState<Entity>()
   const [query, setQuery] = useState('')
   const [kind, setKind] = useState('')
   const [history, setHistory] = useState<Commit[]>([])
   const [findings, setFindings] = useState<Finding[]>([])
   const [checkDetails, setCheckDetails] = useState<
-    Record<string, { findings: Finding[]; affected: string[] }>
+    Record<
+      string,
+      {
+        findings: Finding[]
+        affected: string[]
+      }
+    >
   >({})
   const [ack, setAck] = useState(false)
   const [documentId, setDocumentId] = useState('')
@@ -295,17 +330,17 @@ export function App({ api, t = (k: Key) => zh[k] }: { api: Api; t?: Translate })
     setModal('entity')
   }
   const detail = (
-    <aside className="detail">
+    <aside className={cx('detail')}>
       {entity ? (
         <>
-          <span className="badge">{t(entity.kind)}</span>
-          <h2>{entity.name}</h2>
+          <Tag>{t(entity.kind)}</Tag>
+          <h2 className={cx('heading2')}>{entity.name}</h2>
           <p>{entity.summary}</p>
-          <div className="row">
-            <span className="badge">{t(entity.informationStatus)}</span>
-            {entity.stale && <span className="badge danger">{t('stale')}</span>}
+          <div className={cx('row')}>
+            <Tag>{t(entity.informationStatus)}</Tag>
+            {entity.stale && <Tag tone="danger">{t('stale')}</Tag>}
           </div>
-          <button onClick={() => openEntity(entity)}>{t('edit')}</button>
+          <Button onClick={() => openEntity(entity)}>{t('edit')}</Button>
           {Object.entries(entity.attributes).map(([key, value]) => (
             <p key={key}>
               <b>
@@ -317,10 +352,10 @@ export function App({ api, t = (k: Key) => zh[k] }: { api: Api; t?: Translate })
               {typeof value === 'string' ? value : JSON.stringify(value)}
             </p>
           ))}
-          <h3>{t('sources')}</h3>
+          <h3 className={cx('heading3')}>{t('sources')}</h3>
           {entity.sources.map((s, i) => (
-            <button
-              className="source"
+            <Button
+              className={cx('source')}
               key={i}
               onClick={() =>
                 void act(async () => {
@@ -336,951 +371,972 @@ export function App({ api, t = (k: Key) => zh[k] }: { api: Api; t?: Translate })
               {snapshot?.documents.find((d) => d.id === s.documentId)?.revisionId !== s.revisionId
                 ? ` · ${t('stale')}`
                 : ''}
-            </button>
+            </Button>
           ))}
-          <p className="muted small">ID {entity.id}</p>
+          <p className={cx('muted small')}>ID {entity.id}</p>
         </>
       ) : (
-        <p className="muted">{t('noSelection')}</p>
+        <p className={cx('muted')}>{t('noSelection')}</p>
       )}
     </aside>
   )
-
   return (
-    <div className="mythor">
-      <style>{style}</style>
-      <header>
-        <div>
-          <h1>
-            {t('title')}{' '}
-            <span className="muted small">/ {snapshot?.project.name ?? t('projects')}</span>
-          </h1>
-          <span className="muted">{t('subtitle')}</span>
-        </div>
-        <div className="row">
-          <select
-            aria-label={t('projects')}
-            value={projectId}
-            onChange={(e) => setProjectId(e.target.value)}
-          >
-            <option value="">{t('projects')}</option>
-            {projects.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-                {p.archived ? ` · ${t('archived')}` : ''}
-              </option>
-            ))}
-          </select>
-          <button onClick={() => setModal('project')}>{t('createProject')}</button>
-          <button disabled={busy} onClick={() => void act(() => refresh(), false)}>
-            {t('refresh')}
-          </button>
-        </div>
-      </header>
-      {notice && (
-        <div className="notice" role={error ? 'alert' : 'status'}>
-          {notice}
-          <button style={{ float: 'right' }} onClick={() => setNotice('')}>
-            {t('close')}
-          </button>
-        </div>
-      )}
-      {!projectId ? (
-        <main>
-          <div className="hero">
-            <h2>{t('help')}</h2>
-            <p>{t('helpText')}</p>
-            <div className="row">
-              <button className="primary" onClick={() => setModal('project')}>
-                {t('createProject')}
-              </button>
-              <label>
-                {t('restore')}{' '}
-                <input
-                  type="file"
-                  accept=".json"
-                  onChange={(e) => {
-                    const file = e.target.files?.[0]
-                    if (file)
-                      void act(async () => {
-                        const project = await call<Project>(
-                          'restore',
-                          { text: await file.text() },
-                          '',
-                        )
-                        await refresh('')
-                        setProjectId(project.id)
-                      })
-                  }}
-                />
-              </label>
-            </div>
+    <FeedbackScope error={error ? notice : ''}>
+      <div className={cx('mythor')}>
+        <header className={cx('header')}>
+          <div>
+            <h1 className={cx('heading1')}>
+              {t('title')}{' '}
+              <span className={cx('muted small')}>/ {snapshot?.project.name ?? t('projects')}</span>
+            </h1>
+            <span className={cx('muted')}>{t('subtitle')}</span>
           </div>
-          <div className="cards">
-            {projects.map((p) => (
-              <article key={p.id} className="card project-card">
-                <h3>{p.name}</h3>
-                <p className="muted">
-                  {t('revision')} {p.revision}
-                </p>
-                <button onClick={() => setProjectId(p.id)}>{t('open')} →</button>
-              </article>
-            ))}
+          <div className={cx('row')}>
+            <Select
+              aria-label={t('projects')}
+              value={projectId}
+              onValueChange={(e) => setProjectId(e)}
+            >
+              <SelectOption value="">{t('projects')}</SelectOption>
+              {projects.map((p) => (
+                <SelectOption key={p.id} value={p.id}>
+                  {p.name}
+                  {p.archived ? ` · ${t('archived')}` : ''}
+                </SelectOption>
+              ))}
+            </Select>
+            <Button onClick={() => setModal('project')}>{t('createProject')}</Button>
+            <Button disabled={busy} onClick={() => void act(() => refresh(), false)}>
+              {t('refresh')}
+            </Button>
           </div>
-        </main>
-      ) : (
-        <div className="layout">
-          <nav aria-label="Mythor navigation">
-            {tabs.map((key) => (
-              <button
-                key={key}
-                className={tab === key ? 'active' : ''}
-                onClick={() => {
-                  setTab(key)
-                  setKind('')
-                }}
-              >
-                {t(key)}
-                {key === 'review' && pending.length ? ` (${pending.length})` : ''}
-              </button>
-            ))}
-          </nav>
-          <main>
-            {!snapshot ? (
-              <p role="status">{t('loading')}</p>
-            ) : (
-              <>
-                {tab === 'overview' && (
-                  <>
-                    <div className="hero">
-                      <span className="badge">
-                        {t('revision')} {snapshot.project.revision}
-                      </span>
-                      <h2>{snapshot.project.name}</h2>
-                      <p>{t('helpText')}</p>
-                      <div className="row">
-                        <button className="primary" onClick={() => setModal('task')}>
-                          {t('newTask')}
-                        </button>
-                        <button onClick={() => setModal('import')}>{t('import')}</button>
-                        <button onClick={() => setModal('binding')}>{t('binding')}</button>
-                      </div>
-                    </div>
-                    <div className="cards">
-                      {[
-                        ['objects', snapshot.entities.length],
-                        ['scenes', snapshot.entities.filter((e) => e.kind === 'scene').length],
-                        ['pending', pending.length],
-                        [
-                          'tasks',
-                          snapshot.tasks.filter(
-                            (task) => !['completed', 'cancelled'].includes(task.status),
-                          ).length,
-                        ],
-                      ].map(([key, value]) => (
-                        <div className="card" key={key}>
-                          <div className="muted">{t(key as Key)}</div>
-                          <div className="stat">{value}</div>
-                        </div>
-                      ))}
-                    </div>
-                    <div className="toolbar" style={{ marginTop: 22 }}>
-                      <button onClick={() => void act(async () => download(await call('export')))}>
-                        {t('export')}
-                      </button>
-                      <button onClick={() => void act(async () => download(await call('backup')))}>
-                        {t('backup')}
-                      </button>
-                      <button
-                        onClick={() =>
-                          void act(async () => {
-                            await call('project.archive', {
-                              archived: !snapshot.project.archived,
-                            })
-                            await refresh()
-                          })
-                        }
-                      >
-                        {t(snapshot.project.archived ? 'unarchive' : 'archive')}
-                      </button>
-                    </div>
-                    <p className="muted small">ID {projectId}</p>
-                  </>
-                )}
-                {(tab === 'world' || tab === 'structure') && (
-                  <>
-                    <div className="toolbar">
-                      <input
-                        aria-label={t('search')}
-                        placeholder={t('search')}
-                        value={query}
-                        onChange={(e) => setQuery(e.target.value)}
-                      />
-                      <select
-                        aria-label={t('kind')}
-                        value={kind}
-                        onChange={(e) => setKind(e.target.value)}
-                      >
-                        <option value="">{t('all')}</option>
-                        {KINDS.filter((k) =>
-                          tab === 'world' ? worldKinds.includes(k) : !worldKinds.includes(k),
-                        ).map((k) => (
-                          <option key={k} value={k}>
-                            {t(k)}
-                          </option>
-                        ))}
-                      </select>
-                      <button className="primary" onClick={() => openEntity()}>
-                        {t('add')}
-                      </button>
-                    </div>
-                    <div className="grid">
-                      <div className="list">
-                        {visible.length ? (
-                          visible.map((e) => (
-                            <button className="item" key={e.id} onClick={() => setSelected(e.id)}>
-                              <span>
-                                <b>{e.name}</b>
-                                <br />
-                                <span className="muted small">{e.summary.slice(0, 90)}</span>
-                              </span>
-                              <span className="badge">
-                                {t(e.kind)}
-                                {e.stale ? ' !' : ''}
-                              </span>
-                            </button>
-                          ))
-                        ) : (
-                          <div className="empty">{t('empty')}</div>
-                        )}
-                      </div>
-                      {detail}
-                    </div>
-                  </>
-                )}
-                {tab === 'manuscript' && (
-                  <>
-                    <div className="toolbar">
-                      <select
-                        aria-label={t('manuscript')}
-                        value={documentId}
-                        onChange={(e) => {
-                          const d = snapshot.documents.find((d) => d.id === e.target.value)
-                          if (d) chooseDoc(d)
-                        }}
-                      >
-                        <option value="">{t('newDocument')}</option>
-                        {snapshot.documents.map((d) => (
-                          <option key={d.id} value={d.id}>
-                            {d.title}
-                          </option>
-                        ))}
-                      </select>
-                      <button
-                        onClick={() => {
-                          setDocumentId('')
-                          setDocTitle('')
-                          setDocText('')
-                          setDocEntity('')
-                        }}
-                      >
-                        {t('newDocument')}
-                      </button>
-                      <button onClick={() => setModal('import')}>{t('import')}</button>
-                    </div>
-                    <div className="form-grid">
-                      <label>
-                        {t('titleField')}
-                        <input value={docTitle} onChange={(e) => setDocTitle(e.target.value)} />
-                      </label>
-                      <label>
-                        {t('scene')}
-                        <select value={docEntity} onChange={(e) => setDocEntity(e.target.value)}>
-                          <option value="">—</option>
-                          {snapshot.entities
-                            .filter((e) => ['chapter', 'scene'].includes(e.kind))
-                            .map((e) => (
-                              <option key={e.id} value={e.id}>
-                                {e.name}
-                              </option>
-                            ))}
-                        </select>
-                      </label>
-                    </div>
-                    <TextEditor
-                      key={`${projectId}:${documentId}`}
-                      value={docText}
-                      onChange={setDocText}
-                    />
-                    <div className="toolbar" style={{ marginTop: 12 }}>
-                      <button
-                        className="primary"
-                        disabled={busy || !docTitle.trim()}
-                        onClick={() =>
-                          void act(async () => {
-                            const old = snapshot.documents.find((d) => d.id === documentId)
-                            await propose(
-                              [
-                                {
-                                  type: 'document.put',
-                                  value: {
-                                    id: documentId || uid(),
-                                    revisionId: uid(),
-                                    ...(old ? { parentRevisionId: old.revisionId } : {}),
-                                    ...(docEntity ? { entityId: docEntity } : {}),
-                                    title: docTitle,
-                                    text: docText,
-                                  },
-                                },
-                              ],
-                              `${t('revise')}：${docTitle}`,
-                            )
-                          })
-                        }
-                      >
-                        {t('saveDraft')}
-                      </button>
-                      <span className="muted">{docText.length} 字符</span>
-                    </div>
-                    <details>
-                      <summary>{t('revisionHistory')}</summary>
-                      {history
-                        .filter((c) =>
-                          c.operations.some(
-                            (op) => op.type === 'document.put' && op.value.id === documentId,
-                          ),
-                        )
-                        .map((c) => (
-                          <p key={c.id}>
-                            v{c.revision} · {c.summary} · {c.createdAt}
-                          </p>
-                        ))}
-                    </details>
-                  </>
-                )}
-                {tab === 'timeline' && (
-                  <div className="two">
-                    <section>
-                      <h2>{t('worldTime')}</h2>
-                      {snapshot.entities
-                        .filter((e) => ['event', 'scene'].includes(e.kind))
-                        .sort((a, b) => (a.time?.start ?? Infinity) - (b.time?.start ?? Infinity))
-                        .map((e) => (
-                          <div className="timeline-item" key={e.id}>
-                            <span className="muted small">
-                              {e.time?.label ?? e.time?.start ?? t('unknownTime')}
-                            </span>
-                            <p>
-                              <b>{e.name}</b>
-                            </p>
-                            <p>{e.summary}</p>
-                          </div>
-                        ))}
-                    </section>
-                    <section>
-                      <h2>{t('narrativeTime')}</h2>
-                      {snapshot.entities
-                        .filter((e) => ['chapter', 'scene', 'revelation'].includes(e.kind))
-                        .sort(
-                          (a, b) => (a.narrativeOrder ?? Infinity) - (b.narrativeOrder ?? Infinity),
-                        )
-                        .map((e) => (
-                          <div className="timeline-item" key={e.id}>
-                            <span className="muted small">
-                              {e.narrativeOrder ?? '—'} · {t(e.kind)}
-                            </span>
-                            <p>
-                              <b>{e.name}</b>
-                            </p>
-                            <p>{e.summary}</p>
-                          </div>
-                        ))}
-                    </section>
-                  </div>
-                )}
-                {tab === 'graph' && (
-                  <>
-                    <div className="toolbar">
-                      {(
-                        [
-                          'relationship',
-                          'participation',
-                          'locations',
-                          'organizations',
-                          'causality',
-                          'movement',
-                          'crossings',
-                        ] as Key[]
-                      ).map((mode) => (
-                        <button
-                          key={mode}
-                          className={`chip ${mode === graphMode ? 'active' : ''}`}
-                          onClick={() => setGraphMode(mode)}
-                        >
-                          {t(mode)}
-                        </button>
-                      ))}
-                    </div>
-                    <div className="toolbar">
-                      <select
-                        aria-label={t('focus')}
-                        value={graphFocus}
-                        onChange={(e) => setGraphFocus(e.target.value)}
-                      >
-                        <option value="">{t('reset')}</option>
-                        {snapshot.entities.map((e) => (
-                          <option key={e.id} value={e.id}>
-                            {e.name}
-                          </option>
-                        ))}
-                      </select>
-                      <label>
-                        {t('depth')}{' '}
-                        <select
-                          value={graphDepth}
-                          onChange={(e) => setGraphDepth(Number(e.target.value))}
-                        >
-                          {[1, 2, 3, 4].map((n) => (
-                            <option key={n}>{n}</option>
-                          ))}
-                        </select>
-                      </label>
-                      <button onClick={() => setModal('relation')}>{t('addRelation')}</button>
-                      <input
-                        type="number"
-                        aria-label={t('start')}
-                        placeholder={t('start')}
-                        value={graphTime}
-                        onChange={(e) => setGraphTime(e.target.value)}
-                      />
-                    </div>
-                    <div className="grid">
-                      <div>
-                        <StoryGraph
-                          nodes={graphData.nodes}
-                          edges={graphData.edges}
-                          select={(id) => setSelected(id)}
-                          focus={selected}
-                          route={route}
-                        />
-                        <p className="muted small">
-                          {graphData.nodes.length} / {graphData.total} {t('objects')}
-                          {graphData.truncated && ` · ${t('truncated')}`}
-                        </p>
-                        {graphMode === 'movement' && (
-                          <section aria-label={t('movement')}>
-                            <h3>{t('movement')}</h3>
-                            <p className="muted small">{t('movementHint')}</p>
-                            {graphData.visits?.map((visit, i) => (
-                              <div
-                                className="timeline-item"
-                                key={`${visit.characterId}-${visit.eventId}-${visit.locationId}-${i}`}
-                              >
-                                <b>
-                                  {snapshot.entities.find((e) => e.id === visit.characterId)?.name}
-                                </b>{' '}
-                                · {visit.time ?? t('unknownTime')} →{' '}
-                                <button onClick={() => setSelected(visit.locationId)}>
-                                  {snapshot.entities.find((e) => e.id === visit.locationId)?.name}
-                                </button>
-                                <p>
-                                  <button
-                                    className="chip"
-                                    onClick={() => setSelected(visit.eventId)}
-                                  >
-                                    {snapshot.entities.find((e) => e.id === visit.eventId)?.name}
-                                  </button>
-                                </p>
-                              </div>
-                            ))}
-                          </section>
-                        )}
-                        {graphMode === 'crossings' && (
-                          <section aria-label={t('crossings')}>
-                            {graphData.lanes?.map((lane) => (
-                              <article className="card" key={lane.storylineId}>
-                                <h3>
-                                  {snapshot.entities.find((e) => e.id === lane.storylineId)?.name}
-                                </h3>
-                                <div className="row">
-                                  {lane.eventIds.map((id) => (
-                                    <button key={id} onClick={() => setSelected(id)}>
-                                      {graphData.intersections?.includes(id) ? '↔ ' : ''}
-                                      {snapshot.entities.find((e) => e.id === id)?.name}
-                                    </button>
-                                  ))}
-                                </div>
-                              </article>
-                            ))}
-                          </section>
-                        )}
-                        <div className="toolbar">
-                          <select
-                            value={routeTo}
-                            aria-label={t('to')}
-                            onChange={(e) => setRouteTo(e.target.value)}
-                          >
-                            <option value="">{t('to')}</option>
-                            {graphData.nodes.map((e) => (
-                              <option key={e.id} value={e.id}>
-                                {e.name}
-                              </option>
-                            ))}
-                          </select>
-                          <button
-                            disabled={!selected || !routeTo}
-                            onClick={() => {
-                              const path = findPath(selected, routeTo, graphData.edges)
-                              setRoute(path)
-                              if (!path.length) setNotice(t('noRoute'))
-                            }}
-                          >
-                            {t('route')}
-                          </button>
-                        </div>
-                        <details open>
-                          <summary>{t('listView')}</summary>
-                          {graphData.edges.map((r) => (
-                            <p key={r.id}>
-                              <button className="chip" onClick={() => setSelected(r.from)}>
-                                {snapshot.entities.find((e) => e.id === r.from)?.name}
-                              </button>{' '}
-                              → {r.kind} →{' '}
-                              <button className="chip" onClick={() => setSelected(r.to)}>
-                                {snapshot.entities.find((e) => e.id === r.to)?.name}
-                              </button>
-                              <button
-                                className="chip"
-                                aria-label={`${t('reject')} ${r.id}`}
-                                onClick={() =>
-                                  void act(() =>
-                                    propose(
-                                      [{ type: 'relation.delete', id: r.id }],
-                                      `移除关系 ${r.kind}`,
-                                    ),
-                                  )
-                                }
-                              >
-                                ×
-                              </button>
-                            </p>
-                          ))}
-                        </details>
-                      </div>
-                      {detail}
-                    </div>
-                  </>
-                )}
-                {tab === 'review' && (
-                  <>
-                    <h2>{t('review')}</h2>
-                    <label>
-                      <input
-                        type="checkbox"
-                        checked={ack}
-                        onChange={(e) => setAck(e.target.checked)}
-                      />{' '}
-                      {t('acknowledge')}
-                    </label>
-                    <div className="list">
-                      {pending.length ? (
-                        pending.map((c) => (
-                          <article className="card" key={c.id}>
-                            <h3>{c.summary}</h3>
-                            <p className="muted small">
-                              v{c.baseRevision} → · {c.operations.length} {t('differences')} ·{' '}
-                              {c.createdAt}
-                            </p>
-                            <details>
-                              <summary>{t('compare')}</summary>
-                              {c.operations.map((op, index) => {
-                                const previous = op.type.startsWith('entity.')
-                                  ? snapshot.entities.find(
-                                      (e) => e.id === ('value' in op ? op.value.id : op.id),
-                                    )
-                                  : op.type.startsWith('relation.')
-                                    ? snapshot.relations.find(
-                                        (e) => e.id === ('value' in op ? op.value.id : op.id),
-                                      )
-                                    : snapshot.documents.find(
-                                        (e) => e.id === ('value' in op ? op.value.id : op.id),
-                                      )
-                                return (
-                                  <div key={index}>
-                                    <b>{op.type}</b>
-                                    <div className="two">
-                                      <div>
-                                        {t('old')}
-                                        <pre>
-                                          {previous ? JSON.stringify(previous, null, 2) : '—'}
-                                        </pre>
-                                      </div>
-                                      <div>
-                                        {t('next')}
-                                        <pre>
-                                          {'value' in op ? JSON.stringify(op.value, null, 2) : '—'}
-                                        </pre>
-                                      </div>
-                                    </div>
-                                  </div>
-                                )
-                              })}
-                            </details>
-                            {checkDetails[c.id] && (
-                              <>
-                                <FindingList findings={checkDetails[c.id].findings} />
-                                <p className="small">
-                                  {t('affected')}：
-                                  {checkDetails[c.id].affected
-                                    .map(
-                                      (id) =>
-                                        snapshot.entities.find((e) => e.id === id)?.name ?? id,
-                                    )
-                                    .join('、')}
-                                </p>
-                              </>
-                            )}
-                            <div className="row">
-                              <button
-                                disabled={busy}
-                                onClick={() =>
-                                  void act(async () => {
-                                    const result = await call<{
-                                      findings: Finding[]
-                                      affected: string[]
-                                    }>('changes.validate', { id: c.id })
-                                    setCheckDetails((d) => ({
-                                      ...d,
-                                      [c.id]: result,
-                                    }))
-                                    await refresh()
-                                  }, false)
-                                }
-                              >
-                                {t('validate')}
-                              </button>
-                              <button
-                                className="primary"
-                                disabled={busy}
-                                onClick={() =>
-                                  void act(async () => {
-                                    await call('changes.commit', {
-                                      id: c.id,
-                                      idempotencyKey: `ui_${c.id}`,
-                                      acknowledgeWarnings: ack,
-                                    })
-                                    await refresh()
-                                    setAck(false)
-                                  })
-                                }
-                              >
-                                {t('commit')}
-                              </button>
-                              <button
-                                disabled={busy}
-                                onClick={() =>
-                                  void act(async () => {
-                                    await call('changes.reject', { id: c.id })
-                                    await refresh()
-                                  })
-                                }
-                              >
-                                {t('reject')}
-                              </button>
-                            </div>
-                          </article>
-                        ))
-                      ) : (
-                        <div className="empty">{t('empty')}</div>
-                      )}
-                    </div>
-                  </>
-                )}
-                {tab === 'checks' && (
-                  <>
-                    <h2>{t('checks')}</h2>
-                    <button
-                      onClick={() =>
+        </header>
+        {notice && !modal && (
+          <Feedback
+            text={notice}
+            error={error}
+            onClose={() => setNotice('')}
+            closeLabel={t('close')}
+          />
+        )}
+        {!projectId ? (
+          <main className={cx('main')}>
+            <div className={cx('hero')}>
+              <h2 className={cx('heading2')}>{t('help')}</h2>
+              <p>{t('helpText')}</p>
+              <div className={cx('row')}>
+                <Button onClick={() => setModal('project')} variant="primary">
+                  {t('createProject')}
+                </Button>
+                <Field>
+                  {t('restore')}{' '}
+                  <FilePicker
+                    disabled={busy}
+                    accept=".json"
+                    onFileSelect={(e) => {
+                      const file = e
+                      if (file)
                         void act(async () => {
-                          const result = await call<{ findings: Finding[] }>('world.validate')
-                          setFindings(result.findings)
-                          if (!result.findings.length) setNotice(t('noIssues'))
-                        }, false)
-                      }
-                    >
-                      {t('runChecks')}
-                    </button>
-                    <FindingList findings={findings} />
-                  </>
-                )}
-                {tab === 'history' && (
-                  <>
-                    <h2>{t('history')}</h2>
-                    <div className="list">
-                      {history.map((c) => (
-                        <article className="card" key={c.id}>
-                          <h3>
-                            v{c.revision} · {c.summary}
-                          </h3>
-                          <p className="muted small">
-                            {c.actor} · {c.createdAt}
-                          </p>
-                          <details>
-                            <summary>{t('differences')}</summary>
-                            <pre>{JSON.stringify(c.operations, null, 2)}</pre>
-                          </details>
-                          <button
-                            disabled={busy}
-                            onClick={() =>
-                              void act(async () => {
-                                await call('history.undo', { id: c.id })
-                                await refresh()
-                                setTab('review')
+                          const project = await call<Project>(
+                            'restore',
+                            { text: await file.text() },
+                            '',
+                          )
+                          await refresh('')
+                          setProjectId(project.id)
+                        })
+                    }}
+                    label={t('chooseFile')}
+                  />
+                </Field>
+              </div>
+            </div>
+            <div className={cx('cards')}>
+              {projects.map((p) => (
+                <Panel key={p.id}>
+                  <h3 className={cx('heading3')}>{p.name}</h3>
+                  <p className={cx('muted')}>
+                    {t('revision')} {p.revision}
+                  </p>
+                  <Button onClick={() => setProjectId(p.id)}>{t('open')} →</Button>
+                </Panel>
+              ))}
+            </div>
+          </main>
+        ) : (
+          <div className={cx('layout')}>
+            <nav className={cx('navigation')} aria-label={t('title')}>
+              {tabs.map((key) => (
+                <Button
+                  key={key}
+                  onClick={() => {
+                    setTab(key)
+                    setKind('')
+                  }}
+                  variant={tab === key ? 'primary' : 'ghost'}
+                  aria-current={tab === key ? 'page' : undefined}
+                >
+                  {t(key)}
+                  {key === 'review' && pending.length ? ` (${pending.length})` : ''}
+                </Button>
+              ))}
+            </nav>
+            <main className={cx('main')}>
+              {!snapshot ? (
+                <LoadingState>{t('loading')}</LoadingState>
+              ) : (
+                <>
+                  {tab === 'overview' && (
+                    <>
+                      <div className={cx('hero')}>
+                        <Tag>
+                          {t('revision')} {snapshot.project.revision}
+                        </Tag>
+                        <h2 className={cx('heading2')}>{snapshot.project.name}</h2>
+                        <p>{t('helpText')}</p>
+                        <div className={cx('row')}>
+                          <Button onClick={() => setModal('task')} variant="primary">
+                            {t('newTask')}
+                          </Button>
+                          <Button onClick={() => setModal('import')}>{t('import')}</Button>
+                          <Button onClick={() => setModal('binding')}>{t('binding')}</Button>
+                        </div>
+                      </div>
+                      <div className={cx('cards')}>
+                        {[
+                          ['objects', snapshot.entities.length],
+                          ['scenes', snapshot.entities.filter((e) => e.kind === 'scene').length],
+                          ['pending', pending.length],
+                          [
+                            'tasks',
+                            snapshot.tasks.filter(
+                              (task) => !['completed', 'cancelled'].includes(task.status),
+                            ).length,
+                          ],
+                        ].map(([key, value]) => (
+                          <Panel key={key}>
+                            <div className={cx('muted')}>{t(key as Key)}</div>
+                            <div className={cx('stat')}>{value}</div>
+                          </Panel>
+                        ))}
+                      </div>
+                      <div className={cx('toolbar spaced')}>
+                        <Button
+                          onClick={() => void act(async () => download(await call('export')))}
+                        >
+                          {t('export')}
+                        </Button>
+                        <Button
+                          onClick={() => void act(async () => download(await call('backup')))}
+                        >
+                          {t('backup')}
+                        </Button>
+                        <Button
+                          onClick={() =>
+                            void act(async () => {
+                              await call('project.archive', {
+                                archived: !snapshot.project.archived,
                               })
-                            }
+                              await refresh()
+                            })
+                          }
+                        >
+                          {t(snapshot.project.archived ? 'unarchive' : 'archive')}
+                        </Button>
+                      </div>
+                      <p className={cx('muted small')}>ID {projectId}</p>
+                    </>
+                  )}
+                  {(tab === 'world' || tab === 'structure') && (
+                    <>
+                      <div className={cx('toolbar')}>
+                        <Input
+                          aria-label={t('search')}
+                          placeholder={t('search')}
+                          value={query}
+                          onChange={(e) => setQuery(e.target.value)}
+                        />
+                        <Select
+                          aria-label={t('kind')}
+                          value={kind}
+                          onValueChange={(e) => setKind(e)}
+                        >
+                          <SelectOption value="">{t('all')}</SelectOption>
+                          {KINDS.filter((k) =>
+                            tab === 'world' ? worldKinds.includes(k) : !worldKinds.includes(k),
+                          ).map((k) => (
+                            <SelectOption key={k} value={k}>
+                              {t(k)}
+                            </SelectOption>
+                          ))}
+                        </Select>
+                        <Button onClick={() => openEntity()} variant="primary">
+                          {t('add')}
+                        </Button>
+                      </div>
+                      <div className={cx('grid')}>
+                        <div className={cx('list')}>
+                          {visible.length ? (
+                            visible.map((e) => (
+                              <Button
+                                className={cx('item')}
+                                key={e.id}
+                                onClick={() => setSelected(e.id)}
+                              >
+                                <span>
+                                  <b>{e.name}</b>
+                                  <br />
+                                  <span className={cx('muted small')}>
+                                    {e.summary.slice(0, 90)}
+                                  </span>
+                                </span>
+                                <Tag>
+                                  {t(e.kind)}
+                                  {e.stale ? ' !' : ''}
+                                </Tag>
+                              </Button>
+                            ))
+                          ) : (
+                            <EmptyState>{t('empty')}</EmptyState>
+                          )}
+                        </div>
+                        {detail}
+                      </div>
+                    </>
+                  )}
+                  {tab === 'manuscript' && (
+                    <>
+                      <div className={cx('toolbar')}>
+                        <Select
+                          aria-label={t('manuscript')}
+                          value={documentId}
+                          onValueChange={(e) => {
+                            const d = snapshot.documents.find((d) => d.id === e)
+                            if (d) chooseDoc(d)
+                          }}
+                        >
+                          <SelectOption value="">{t('newDocument')}</SelectOption>
+                          {snapshot.documents.map((d) => (
+                            <SelectOption key={d.id} value={d.id}>
+                              {d.title}
+                            </SelectOption>
+                          ))}
+                        </Select>
+                        <Button
+                          onClick={() => {
+                            setDocumentId('')
+                            setDocTitle('')
+                            setDocText('')
+                            setDocEntity('')
+                          }}
+                        >
+                          {t('newDocument')}
+                        </Button>
+                        <Button onClick={() => setModal('import')}>{t('import')}</Button>
+                      </div>
+                      <div className={cx('form-grid')}>
+                        <Field>
+                          {t('titleField')}
+                          <Input value={docTitle} onChange={(e) => setDocTitle(e.target.value)} />
+                        </Field>
+                        <Field>
+                          {t('scene')}
+                          <Select value={docEntity} onValueChange={(e) => setDocEntity(e)}>
+                            <SelectOption value="">—</SelectOption>
+                            {snapshot.entities
+                              .filter((e) => ['chapter', 'scene'].includes(e.kind))
+                              .map((e) => (
+                                <SelectOption key={e.id} value={e.id}>
+                                  {e.name}
+                                </SelectOption>
+                              ))}
+                          </Select>
+                        </Field>
+                      </div>
+                      <TextEditor
+                        key={`${projectId}:${documentId}`}
+                        value={docText}
+                        onChange={setDocText}
+                      />
+                      <div className={cx('toolbar spaced')}>
+                        <Button
+                          disabled={busy || !docTitle.trim()}
+                          onClick={() =>
+                            void act(async () => {
+                              const old = snapshot.documents.find((d) => d.id === documentId)
+                              await propose(
+                                [
+                                  {
+                                    type: 'document.put',
+                                    value: {
+                                      id: documentId || uid(),
+                                      revisionId: uid(),
+                                      ...(old ? { parentRevisionId: old.revisionId } : {}),
+                                      ...(docEntity ? { entityId: docEntity } : {}),
+                                      title: docTitle,
+                                      text: docText,
+                                    },
+                                  },
+                                ],
+                                `${t('revise')}：${docTitle}`,
+                              )
+                            })
+                          }
+                          variant="primary"
+                        >
+                          {t('saveDraft')}
+                        </Button>
+                        <span className={cx('muted')}>{docText.length} 字符</span>
+                      </div>
+                      <Disclosure title={t('revisionHistory')}>
+                        {history
+                          .filter((c) =>
+                            c.operations.some(
+                              (op) => op.type === 'document.put' && op.value.id === documentId,
+                            ),
+                          )
+                          .map((c) => (
+                            <p key={c.id}>
+                              v{c.revision} · {c.summary} · {c.createdAt}
+                            </p>
+                          ))}
+                      </Disclosure>
+                    </>
+                  )}
+                  {tab === 'timeline' && (
+                    <div className={cx('two')}>
+                      <section>
+                        <h2 className={cx('heading2')}>{t('worldTime')}</h2>
+                        {snapshot.entities
+                          .filter((e) => ['event', 'scene'].includes(e.kind))
+                          .sort((a, b) => (a.time?.start ?? Infinity) - (b.time?.start ?? Infinity))
+                          .map((e) => (
+                            <div className={cx('timeline-item')} key={e.id}>
+                              <span className={cx('muted small')}>
+                                {e.time?.label ?? e.time?.start ?? t('unknownTime')}
+                              </span>
+                              <p>
+                                <b>{e.name}</b>
+                              </p>
+                              <p>{e.summary}</p>
+                            </div>
+                          ))}
+                      </section>
+                      <section>
+                        <h2 className={cx('heading2')}>{t('narrativeTime')}</h2>
+                        {snapshot.entities
+                          .filter((e) => ['chapter', 'scene', 'revelation'].includes(e.kind))
+                          .sort(
+                            (a, b) =>
+                              (a.narrativeOrder ?? Infinity) - (b.narrativeOrder ?? Infinity),
+                          )
+                          .map((e) => (
+                            <div className={cx('timeline-item')} key={e.id}>
+                              <span className={cx('muted small')}>
+                                {e.narrativeOrder ?? '—'} · {t(e.kind)}
+                              </span>
+                              <p>
+                                <b>{e.name}</b>
+                              </p>
+                              <p>{e.summary}</p>
+                            </div>
+                          ))}
+                      </section>
+                    </div>
+                  )}
+                  {tab === 'graph' && (
+                    <>
+                      <div className={cx('toolbar')}>
+                        {(
+                          [
+                            'relationship',
+                            'participation',
+                            'locations',
+                            'organizations',
+                            'causality',
+                            'movement',
+                            'crossings',
+                          ] as Key[]
+                        ).map((mode) => (
+                          <Pill
+                            key={mode}
+                            onClick={() => setGraphMode(mode)}
+                            active={mode === graphMode}
                           >
-                            {t('undo')}
-                          </button>
-                        </article>
-                      ))}
-                    </div>
-                  </>
-                )}
-                {tab === 'tasks' && (
-                  <>
-                    <div className="toolbar">
-                      <h2>{t('tasks')}</h2>
-                      <button className="primary" onClick={() => setModal('task')}>
-                        {t('newTask')}
-                      </button>
-                    </div>
-                    <p className="muted">{t('taskInstructions')}</p>
-                    <div className="list">
-                      {snapshot.tasks.map((task) => (
-                        <article className="card" key={task.id}>
-                          <div className="row">
-                            <h3>{task.intent}</h3>
-                            <span className="badge">
-                              {task.stage} / {task.status}
-                            </span>
-                          </div>
-                          <p className="small muted">
-                            ID {task.id} · v{task.baseRevision}
+                            {t(mode)}
+                          </Pill>
+                        ))}
+                      </div>
+                      <div className={cx('toolbar')}>
+                        <Select
+                          aria-label={t('focus')}
+                          value={graphFocus}
+                          onValueChange={(e) => setGraphFocus(e)}
+                        >
+                          <SelectOption value="">{t('reset')}</SelectOption>
+                          {snapshot.entities.map((e) => (
+                            <SelectOption key={e.id} value={e.id}>
+                              {e.name}
+                            </SelectOption>
+                          ))}
+                        </Select>
+                        <Field>
+                          {t('depth')}{' '}
+                          <Select
+                            value={graphDepth}
+                            onValueChange={(e) => setGraphDepth(Number(e))}
+                          >
+                            {[1, 2, 3, 4].map((n) => (
+                              <SelectOption key={n} value={n}>
+                                {n}
+                              </SelectOption>
+                            ))}
+                          </Select>
+                        </Field>
+                        <Button onClick={() => setModal('relation')}>{t('addRelation')}</Button>
+                        <NumberField
+                          aria-label={t('start')}
+                          placeholder={t('start')}
+                          value={graphTime}
+                          onChange={(e) => setGraphTime(e.target.value)}
+                        />
+                      </div>
+                      <div className={cx('grid')}>
+                        <div>
+                          <StoryGraph
+                            nodes={graphData.nodes}
+                            edges={graphData.edges}
+                            select={(id) => setSelected(id)}
+                            focus={selected}
+                            route={route}
+                          />
+                          <p className={cx('muted small')}>
+                            {graphData.nodes.length} / {graphData.total} {t('objects')}
+                            {graphData.truncated && ` · ${t('truncated')}`}
                           </p>
-                          {task.error && <p role="alert">{task.error}</p>}
-                          <details>
-                            <summary>{t('details')}</summary>
-                            <pre>{JSON.stringify(task.artifacts, null, 2)}</pre>
-                          </details>
-                          <div className="row">
-                            <button
-                              disabled={busy || task.status === 'completed'}
-                              onClick={() =>
-                                void act(async () => {
-                                  try {
-                                    await call('task.resume', { id: task.id })
-                                  } finally {
-                                    await refresh()
-                                  }
-                                })
-                              }
+                          {graphMode === 'movement' && (
+                            <section aria-label={t('movement')}>
+                              <h3 className={cx('heading3')}>{t('movement')}</h3>
+                              <p className={cx('muted small')}>{t('movementHint')}</p>
+                              {graphData.visits?.map((visit, i) => (
+                                <div
+                                  className={cx('timeline-item')}
+                                  key={`${visit.characterId}-${visit.eventId}-${visit.locationId}-${i}`}
+                                >
+                                  <b>
+                                    {
+                                      snapshot.entities.find((e) => e.id === visit.characterId)
+                                        ?.name
+                                    }
+                                  </b>{' '}
+                                  · {visit.time ?? t('unknownTime')} →{' '}
+                                  <Button onClick={() => setSelected(visit.locationId)}>
+                                    {snapshot.entities.find((e) => e.id === visit.locationId)?.name}
+                                  </Button>
+                                  <p>
+                                    <Button size="sm" onClick={() => setSelected(visit.eventId)}>
+                                      {snapshot.entities.find((e) => e.id === visit.eventId)?.name}
+                                    </Button>
+                                  </p>
+                                </div>
+                              ))}
+                            </section>
+                          )}
+                          {graphMode === 'crossings' && (
+                            <section aria-label={t('crossings')}>
+                              {graphData.lanes?.map((lane) => (
+                                <Panel key={lane.storylineId}>
+                                  <h3 className={cx('heading3')}>
+                                    {snapshot.entities.find((e) => e.id === lane.storylineId)?.name}
+                                  </h3>
+                                  <div className={cx('row')}>
+                                    {lane.eventIds.map((id) => (
+                                      <Button key={id} onClick={() => setSelected(id)}>
+                                        {graphData.intersections?.includes(id) ? '↔ ' : ''}
+                                        {snapshot.entities.find((e) => e.id === id)?.name}
+                                      </Button>
+                                    ))}
+                                  </div>
+                                </Panel>
+                              ))}
+                            </section>
+                          )}
+                          <div className={cx('toolbar')}>
+                            <Select
+                              value={routeTo}
+                              aria-label={t('to')}
+                              onValueChange={(e) => setRouteTo(e)}
                             >
-                              {t('resume')}
-                            </button>
-                            <button
-                              disabled={busy || task.status === 'completed'}
-                              onClick={() =>
-                                void act(async () => {
-                                  await call('task.cancel', { id: task.id })
-                                  await refresh()
-                                })
-                              }
-                            >
-                              {t('cancel')}
-                            </button>
-                            <button
-                              disabled={['completed', 'cancelled'].includes(task.status)}
+                              <SelectOption value="">{t('to')}</SelectOption>
+                              {graphData.nodes.map((e) => (
+                                <SelectOption key={e.id} value={e.id}>
+                                  {e.name}
+                                </SelectOption>
+                              ))}
+                            </Select>
+                            <Button
+                              disabled={!selected || !routeTo}
                               onClick={() => {
-                                setGrantTask(task.id)
-                                setModal('grant')
+                                const path = findPath(selected, routeTo, graphData.edges)
+                                setRoute(path)
+                                if (!path.length) setNotice(t('noRoute'))
                               }}
                             >
-                              {t('grant')}
-                            </button>
-                            {['plan', 'check'].includes(task.kind) &&
-                              task.status === 'waiting_review' && (
-                                <button
+                              {t('route')}
+                            </Button>
+                          </div>
+                          <Disclosure open title={t('listView')}>
+                            {graphData.edges.map((r) => (
+                              <p key={r.id}>
+                                <Button size="sm" onClick={() => setSelected(r.from)}>
+                                  {snapshot.entities.find((e) => e.id === r.from)?.name}
+                                </Button>{' '}
+                                → {r.kind} →{' '}
+                                <Button size="sm" onClick={() => setSelected(r.to)}>
+                                  {snapshot.entities.find((e) => e.id === r.to)?.name}
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  aria-label={`${t('reject')} ${r.id}`}
+                                  onClick={() =>
+                                    void act(() =>
+                                      propose(
+                                        [{ type: 'relation.delete', id: r.id }],
+                                        `移除关系 ${r.kind}`,
+                                      ),
+                                    )
+                                  }
+                                >
+                                  ×
+                                </Button>
+                              </p>
+                            ))}
+                          </Disclosure>
+                        </div>
+                        {detail}
+                      </div>
+                    </>
+                  )}
+                  {tab === 'review' && (
+                    <>
+                      <h2 className={cx('heading2')}>{t('review')}</h2>
+                      <Checkbox checked={ack} onChange={setAck} label={t('acknowledge')} />
+                      <div className={cx('list')}>
+                        {pending.length ? (
+                          pending.map((c) => (
+                            <Panel key={c.id}>
+                              <h3 className={cx('heading3')}>{c.summary}</h3>
+                              <p className={cx('muted small')}>
+                                v{c.baseRevision} → · {c.operations.length} {t('differences')} ·{' '}
+                                {c.createdAt}
+                              </p>
+                              <Disclosure title={t('compare')}>
+                                {c.operations.map((op, index) => {
+                                  const previous = op.type.startsWith('entity.')
+                                    ? snapshot.entities.find(
+                                        (e) => e.id === ('value' in op ? op.value.id : op.id),
+                                      )
+                                    : op.type.startsWith('relation.')
+                                      ? snapshot.relations.find(
+                                          (e) => e.id === ('value' in op ? op.value.id : op.id),
+                                        )
+                                      : snapshot.documents.find(
+                                          (e) => e.id === ('value' in op ? op.value.id : op.id),
+                                        )
+                                  return (
+                                    <div key={index}>
+                                      <b>{op.type}</b>
+                                      {op.type.startsWith('document.') &&
+                                      'value' in op &&
+                                      'text' in op.value ? (
+                                        <TextDiff
+                                          before={
+                                            previous && 'text' in previous ? previous.text : null
+                                          }
+                                          after={op.value.text}
+                                          title={'title' in op.value ? op.value.title : op.type}
+                                          t={t}
+                                        />
+                                      ) : (
+                                        <div className={cx('two')}>
+                                          <div>
+                                            {t('old')}
+                                            <JsonView
+                                              data={previous ? previous : '—'}
+                                              label={t('details')}
+                                              t={t}
+                                            />
+                                          </div>
+                                          <div>
+                                            {t('next')}
+                                            <JsonView
+                                              data={'value' in op ? op.value : '—'}
+                                              label={t('details')}
+                                              t={t}
+                                            />
+                                          </div>
+                                        </div>
+                                      )}
+                                    </div>
+                                  )
+                                })}
+                              </Disclosure>
+                              {checkDetails[c.id] && (
+                                <>
+                                  <FindingList findings={checkDetails[c.id].findings} />
+                                  <p className={cx('small')}>
+                                    {t('affected')}：
+                                    {checkDetails[c.id].affected
+                                      .map(
+                                        (id) =>
+                                          snapshot.entities.find((e) => e.id === id)?.name ?? id,
+                                      )
+                                      .join('、')}
+                                  </p>
+                                </>
+                              )}
+                              <div className={cx('row')}>
+                                <Button
                                   disabled={busy}
                                   onClick={() =>
                                     void act(async () => {
-                                      await call('task.finish', { id: task.id })
+                                      const result = await call<{
+                                        findings: Finding[]
+                                        affected: string[]
+                                      }>('changes.validate', { id: c.id })
+                                      setCheckDetails((d) => ({
+                                        ...d,
+                                        [c.id]: result,
+                                      }))
+                                      await refresh()
+                                    }, false)
+                                  }
+                                >
+                                  {t('validate')}
+                                </Button>
+                                <Button
+                                  disabled={busy}
+                                  onClick={() =>
+                                    void act(async () => {
+                                      await call('changes.commit', {
+                                        id: c.id,
+                                        idempotencyKey: `ui_${c.id}`,
+                                        acknowledgeWarnings: ack,
+                                      })
+                                      await refresh()
+                                      setAck(false)
+                                    })
+                                  }
+                                  variant="primary"
+                                >
+                                  {t('commit')}
+                                </Button>
+                                <Button
+                                  disabled={busy}
+                                  onClick={() =>
+                                    void act(async () => {
+                                      await call('changes.reject', { id: c.id })
                                       await refresh()
                                     })
                                   }
                                 >
-                                  {t('finishTask')}
-                                </button>
-                              )}
-                          </div>
-                        </article>
-                      ))}
-                    </div>
-                  </>
-                )}
-              </>
-            )}
-          </main>
-        </div>
-      )}
-      {modal === 'project' && (
-        <SimpleForm
-          title={t('createProject')}
-          close={() => setModal(undefined)}
-          fields={[['name', t('projectName')]]}
-          busy={busy}
-          submit={(values) =>
-            act(async () => {
-              const p = await call<Project>('project.create', values, '')
-              setModal(undefined)
-              await refresh('')
-              setProjectId(p.id)
-            })
-          }
-          t={t}
-        />
-      )}
-      {modal === 'source' && evidence && (
-        <Modal
-          title={`${t('sources')} · ${evidence.document.title}`}
-          close={() => setModal(undefined)}
-        >
-          <p className="small muted">
-            {evidence.document.revisionId} · {evidence.start}–{evidence.end}
-          </p>
-          <pre>
-            {evidence.document.text.slice(0, evidence.start)}
-            <mark>{evidence.document.text.slice(evidence.start, evidence.end)}</mark>
-            {evidence.document.text.slice(evidence.end)}
-          </pre>
-          <button onClick={() => setModal(undefined)}>{t('close')}</button>
-        </Modal>
-      )}
-      {modal === 'entity' && (
-        <EntityEditor
-          entity={editEntity}
-          close={() => setModal(undefined)}
-          busy={busy}
-          t={t}
-          save={(value) =>
-            act(() =>
-              propose(
-                [{ type: 'entity.put', value }],
-                `${editEntity ? t('edit') : t('add')}：${value.name}`,
-              ),
-            )
-          }
-        />
-      )}
-      {modal === 'import' && (
-        <ImportForm
-          t={t}
-          close={() => setModal(undefined)}
-          busy={busy}
-          preview={(p) => call('import', { ...p, preview: true })}
-          save={(p) =>
-            act(async () => {
-              await call('import', p)
-              await refresh()
-              setModal(undefined)
-              setTab('review')
-            })
-          }
-        />
-      )}
-      {modal === 'relation' && (
-        <RelationForm
-          t={t}
-          entities={snapshot?.entities ?? []}
-          close={() => setModal(undefined)}
-          busy={busy}
-          save={(r) =>
-            act(() =>
-              propose([{ type: 'relation.put', value: r }], `${t('addRelation')}：${r.kind}`),
-            )
-          }
-        />
-      )}
-      {modal === 'task' && (
-        <TaskForm
-          t={t}
-          close={() => setModal(undefined)}
-          busy={busy}
-          save={(p) =>
-            act(async () => {
-              try {
-                await call('task.start', p)
-              } finally {
+                                  {t('reject')}
+                                </Button>
+                              </div>
+                            </Panel>
+                          ))
+                        ) : (
+                          <EmptyState>{t('empty')}</EmptyState>
+                        )}
+                      </div>
+                    </>
+                  )}
+                  {tab === 'checks' && (
+                    <>
+                      <h2 className={cx('heading2')}>{t('checks')}</h2>
+                      <Button
+                        onClick={() =>
+                          void act(async () => {
+                            const result = await call<{
+                              findings: Finding[]
+                            }>('world.validate')
+                            setFindings(result.findings)
+                            if (!result.findings.length) setNotice(t('noIssues'))
+                          }, false)
+                        }
+                      >
+                        {t('runChecks')}
+                      </Button>
+                      <FindingList findings={findings} />
+                    </>
+                  )}
+                  {tab === 'history' && (
+                    <>
+                      <h2 className={cx('heading2')}>{t('history')}</h2>
+                      <div className={cx('list')}>
+                        {history.map((c) => (
+                          <Panel key={c.id}>
+                            <h3 className={cx('heading3')}>
+                              v{c.revision} · {c.summary}
+                            </h3>
+                            <p className={cx('muted small')}>
+                              {c.actor} · {c.createdAt}
+                            </p>
+                            <Disclosure title={t('differences')}>
+                              <JsonView data={c.operations} label={t('details')} t={t} />
+                            </Disclosure>
+                            <Button
+                              disabled={busy}
+                              onClick={() =>
+                                void act(async () => {
+                                  await call('history.undo', { id: c.id })
+                                  await refresh()
+                                  setTab('review')
+                                })
+                              }
+                            >
+                              {t('undo')}
+                            </Button>
+                          </Panel>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                  {tab === 'tasks' && (
+                    <>
+                      <div className={cx('toolbar')}>
+                        <h2 className={cx('heading2')}>{t('tasks')}</h2>
+                        <Button onClick={() => setModal('task')} variant="primary">
+                          {t('newTask')}
+                        </Button>
+                      </div>
+                      <p className={cx('muted')}>{t('taskInstructions')}</p>
+                      <div className={cx('list')}>
+                        {snapshot.tasks.map((task) => (
+                          <Panel key={task.id}>
+                            <div className={cx('row')}>
+                              <h3 className={cx('heading3')}>{task.intent}</h3>
+                              <Tag>
+                                {task.stage} / {task.status}
+                              </Tag>
+                            </div>
+                            <p className={cx('small muted')}>
+                              ID {task.id} · v{task.baseRevision}
+                            </p>
+                            {task.error && <ErrorState>{task.error}</ErrorState>}
+                            <Disclosure title={t('details')}>
+                              <JsonView data={task.artifacts} label={t('details')} t={t} />
+                            </Disclosure>
+                            <div className={cx('row')}>
+                              <Button
+                                disabled={busy || task.status === 'completed'}
+                                onClick={() =>
+                                  void act(async () => {
+                                    try {
+                                      await call('task.resume', { id: task.id })
+                                    } finally {
+                                      await refresh()
+                                    }
+                                  })
+                                }
+                              >
+                                {t('resume')}
+                              </Button>
+                              <Button
+                                disabled={busy || task.status === 'completed'}
+                                onClick={() =>
+                                  void act(async () => {
+                                    await call('task.cancel', { id: task.id })
+                                    await refresh()
+                                  })
+                                }
+                              >
+                                {t('cancel')}
+                              </Button>
+                              <Button
+                                disabled={['completed', 'cancelled'].includes(task.status)}
+                                onClick={() => {
+                                  setGrantTask(task.id)
+                                  setModal('grant')
+                                }}
+                              >
+                                {t('grant')}
+                              </Button>
+                              {['plan', 'check'].includes(task.kind) &&
+                                task.status === 'waiting_review' && (
+                                  <Button
+                                    disabled={busy}
+                                    onClick={() =>
+                                      void act(async () => {
+                                        await call('task.finish', { id: task.id })
+                                        await refresh()
+                                      })
+                                    }
+                                  >
+                                    {t('finishTask')}
+                                  </Button>
+                                )}
+                            </div>
+                          </Panel>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                </>
+              )}
+            </main>
+          </div>
+        )}
+        {modal === 'project' && (
+          <SimpleForm
+            title={t('createProject')}
+            close={() => setModal(undefined)}
+            fields={[['name', t('projectName')]]}
+            busy={busy}
+            submit={(values) =>
+              act(async () => {
+                const p = await call<Project>('project.create', values, '')
+                setModal(undefined)
+                await refresh('')
+                setProjectId(p.id)
+              })
+            }
+            t={t}
+          />
+        )}
+        {modal === 'source' && evidence && (
+          <Modal
+            title={`${t('sources')} · ${evidence.document.title}`}
+            close={() => setModal(undefined)}
+            closeLabel={t('close')}
+          >
+            <p className={cx('small muted')}>
+              {evidence.document.revisionId} · {evidence.start}–{evidence.end}
+            </p>
+            <SourceText>
+              {evidence.document.text.slice(0, evidence.start)}
+              <mark>{evidence.document.text.slice(evidence.start, evidence.end)}</mark>
+              {evidence.document.text.slice(evidence.end)}
+            </SourceText>
+            <Button onClick={() => setModal(undefined)}>{t('close')}</Button>
+          </Modal>
+        )}
+        {modal === 'entity' && (
+          <EntityEditor
+            entity={editEntity}
+            close={() => setModal(undefined)}
+            busy={busy}
+            t={t}
+            save={(value) =>
+              act(() =>
+                propose(
+                  [{ type: 'entity.put', value }],
+                  `${editEntity ? t('edit') : t('add')}：${value.name}`,
+                ),
+              )
+            }
+          />
+        )}
+        {modal === 'import' && (
+          <ImportForm
+            t={t}
+            close={() => setModal(undefined)}
+            busy={busy}
+            preview={(p) => call('import', { ...p, preview: true })}
+            save={(p) =>
+              act(async () => {
+                await call('import', p)
                 await refresh()
                 setModal(undefined)
-                setTab('tasks')
-              }
-            })
-          }
-        />
-      )}
-      {modal === 'grant' && (
-        <SimpleForm
-          title={t('grant')}
-          fields={[['ids', t('grantHint')]]}
-          t={t}
-          close={() => setModal(undefined)}
-          busy={busy}
-          submit={(values) =>
-            act(async () => {
-              await call('grant', {
-                taskId: grantTask,
-                entityIds: values.ids
-                  .split(',')
-                  .map((s) => s.trim())
-                  .filter(Boolean),
-                expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+                setTab('review')
               })
-              setModal(undefined)
-              await refresh()
-            })
-          }
-        />
-      )}
-      {modal === 'binding' && (
-        <SimpleForm
-          title={t('binding')}
-          fields={[['sessionId', t('sessionId')]]}
-          t={t}
-          close={() => setModal(undefined)}
-          busy={busy}
-          submit={(values) =>
-            act(async () => {
-              await call('binding.set', values)
-              setModal(undefined)
-            })
-          }
-        />
-      )}
-    </div>
+            }
+          />
+        )}
+        {modal === 'relation' && (
+          <RelationForm
+            t={t}
+            entities={snapshot?.entities ?? []}
+            close={() => setModal(undefined)}
+            busy={busy}
+            save={(r) =>
+              act(() =>
+                propose([{ type: 'relation.put', value: r }], `${t('addRelation')}：${r.kind}`),
+              )
+            }
+          />
+        )}
+        {modal === 'task' && (
+          <TaskForm
+            t={t}
+            close={() => setModal(undefined)}
+            busy={busy}
+            save={(p) =>
+              act(async () => {
+                try {
+                  await call('task.start', p)
+                } finally {
+                  await refresh()
+                  setModal(undefined)
+                  setTab('tasks')
+                }
+              })
+            }
+          />
+        )}
+        {modal === 'grant' && (
+          <SimpleForm
+            title={t('grant')}
+            fields={[['ids', t('grantHint')]]}
+            t={t}
+            close={() => setModal(undefined)}
+            busy={busy}
+            submit={(values) =>
+              act(async () => {
+                await call('grant', {
+                  taskId: grantTask,
+                  entityIds: values.ids
+                    .split(',')
+                    .map((s) => s.trim())
+                    .filter(Boolean),
+                  expiresAt: new Date(Date.now() + 86400000).toISOString(),
+                })
+                setModal(undefined)
+                await refresh()
+              })
+            }
+          />
+        )}
+        {modal === 'binding' && (
+          <SimpleForm
+            title={t('binding')}
+            fields={[['sessionId', t('sessionId')]]}
+            t={t}
+            close={() => setModal(undefined)}
+            busy={busy}
+            submit={(values) =>
+              act(async () => {
+                await call('binding.set', values)
+                setModal(undefined)
+              })
+            }
+          />
+        )}
+      </div>
+    </FeedbackScope>
   )
 }
 function FindingList({ findings }: { findings: Finding[] }) {
   return (
-    <div className="list" style={{ margin: '15px 0' }}>
+    <div className={cx('list findings')}>
       {findings.map((f, i) => (
-        <div className="card" key={i}>
-          <span className={`badge ${f.severity === 'error' ? 'danger' : ''}`}>{f.severity}</span>{' '}
-          {f.message}
-          <div className="small muted">
+        <Panel key={i}>
+          <Tag tone={f.severity === 'error' ? 'danger' : 'warning'}>{f.severity}</Tag> {f.message}
+          <div className={cx('small muted')}>
             {f.code} · {f.entityIds.join(', ')}
           </div>
           {f.suggestion && <p>{f.suggestion}</p>}
-        </div>
+        </Panel>
       ))}
     </div>
   )
@@ -1302,7 +1358,7 @@ function SimpleForm({
 }) {
   const [values, setValues] = useState<Record<string, string>>({})
   return (
-    <Modal title={title} close={close}>
+    <Modal title={title} close={close} closeLabel={t('close')}>
       <form
         onSubmit={(e) => {
           e.preventDefault()
@@ -1310,24 +1366,25 @@ function SimpleForm({
         }}
       >
         {fields.map(([key, label]) => (
-          <label key={key}>
+          <Field key={key}>
             {label}
-            <input
+            <Input
+              data-modal-autofocus
               required
-              style={{ width: '100%' }}
+              className={cx('fullWidth')}
               value={values[key] ?? ''}
               onChange={(e) => setValues((v) => ({ ...v, [key]: e.target.value }))}
             />
-          </label>
+          </Field>
         ))}
-        <footer>
-          <button type="button" onClick={close}>
+        <FormActions>
+          <Button type="button" onClick={close}>
             {t('cancel')}
-          </button>
-          <button className="primary" disabled={busy}>
+          </Button>
+          <Button disabled={busy} variant="primary" type="submit">
             {t('save')}
-          </button>
-        </footer>
+          </Button>
+        </FormActions>
       </form>
     </Modal>
   )
@@ -1355,7 +1412,7 @@ function EntityEditor({
   const [localError, setLocalError] = useState('')
   const update = (changes: Partial<Entity>) => setValue((v) => ({ ...v, ...changes }))
   return (
-    <Modal title={entity ? t('edit') : t('add')} close={close}>
+    <Modal title={entity ? t('edit') : t('add')} close={close} closeLabel={t('close')}>
       <form
         onSubmit={(e) => {
           e.preventDefault()
@@ -1367,33 +1424,35 @@ function EntityEditor({
           void save(parsed.data)
         }}
       >
-        <div className="form-grid">
-          <label>
+        <div className={cx('form-grid')}>
+          <Field>
             {t('name')}
-            <input required value={value.name} onChange={(e) => update({ name: e.target.value })} />
-          </label>
-          <label>
+            <Input
+              data-modal-autofocus
+              required
+              value={value.name}
+              onChange={(e) => update({ name: e.target.value })}
+            />
+          </Field>
+          <Field>
             {t('kind')}
-            <select
-              value={value.kind}
-              onChange={(e) => update({ kind: e.target.value as Entity['kind'] })}
-            >
+            <Select value={value.kind} onValueChange={(e) => update({ kind: e as Entity['kind'] })}>
               {KINDS.map((k) => (
-                <option key={k} value={k}>
+                <SelectOption key={k} value={k}>
                   {t(k)}
-                </option>
+                </SelectOption>
               ))}
-            </select>
-          </label>
+            </Select>
+          </Field>
         </div>
-        <label>
+        <Field>
           {t('summary')}
-          <textarea value={value.summary} onChange={(e) => update({ summary: e.target.value })} />
-        </label>
-        <label>
+          <TextArea value={value.summary} onChange={(e) => update({ summary: e.target.value })} />
+        </Field>
+        <Field>
           {t('aliases')}
-          <input
-            style={{ width: '100%' }}
+          <Input
+            className={cx('fullWidth')}
             value={value.aliases.join(', ')}
             onChange={(e) =>
               update({
@@ -1404,29 +1463,28 @@ function EntityEditor({
               })
             }
           />
-        </label>
-        <div className="form-grid">
-          <label>
+        </Field>
+        <div className={cx('form-grid')}>
+          <Field>
             {t('info')}
-            <select
+            <Select
               value={value.informationStatus}
-              onChange={(e) =>
+              onValueChange={(e) =>
                 update({
-                  informationStatus: e.target.value as Entity['informationStatus'],
+                  informationStatus: e as Entity['informationStatus'],
                 })
               }
             >
               {(['fact', 'plan', 'hypothesis'] as const).map((k) => (
-                <option key={k} value={k}>
+                <SelectOption key={k} value={k}>
                   {t(k)}
-                </option>
+                </SelectOption>
               ))}
-            </select>
-          </label>
-          <label>
+            </Select>
+          </Field>
+          <Field>
             {t('order')}
-            <input
-              type="number"
+            <NumberField
               value={value.narrativeOrder ?? ''}
               onChange={(e) =>
                 update({
@@ -1434,11 +1492,10 @@ function EntityEditor({
                 })
               }
             />
-          </label>
-          <label>
+          </Field>
+          <Field>
             {t('start')}
-            <input
-              type="number"
+            <NumberField
               value={value.time?.start ?? ''}
               onChange={(e) =>
                 update({
@@ -1449,11 +1506,10 @@ function EntityEditor({
                 })
               }
             />
-          </label>
-          <label>
+          </Field>
+          <Field>
             {t('end')}
-            <input
-              type="number"
+            <NumberField
               value={value.time?.end ?? ''}
               onChange={(e) =>
                 update({
@@ -1464,14 +1520,14 @@ function EntityEditor({
                 })
               }
             />
-          </label>
+          </Field>
         </div>
-        <h3 style={{ marginTop: 18 }}>{t('attrs')}</h3>
+        <h3 className={cx('heading3 spaced')}>{t('attrs')}</h3>
         {fields[value.kind]?.map(([key, label]) => (
-          <label key={key}>
+          <Field key={key}>
             {t(label)}
-            <input
-              style={{ width: '100%' }}
+            <Input
+              className={cx('fullWidth')}
               value={String(value.attributes[key] ?? '')}
               onChange={(e) =>
                 update({
@@ -1479,17 +1535,17 @@ function EntityEditor({
                 })
               }
             />
-          </label>
+          </Field>
         ))}
-        {localError && <p role="alert">{localError}</p>}
-        <footer>
-          <button type="button" onClick={close}>
+        {localError && <ErrorState>{localError}</ErrorState>}
+        <FormActions>
+          <Button type="button" onClick={close}>
             {t('cancel')}
-          </button>
-          <button className="primary" disabled={busy}>
+          </Button>
+          <Button disabled={busy} variant="primary" type="submit">
             {t('save')}
-          </button>
-        </footer>
+          </Button>
+        </FormActions>
       </form>
     </Modal>
   )
@@ -1512,38 +1568,42 @@ function ImportForm({
   const [result, setResult] = useState<Json>()
   const [error, setError] = useState('')
   return (
-    <Modal title={t('import')} close={close}>
-      <label>
+    <Modal title={t('import')} close={close} closeLabel={t('close')}>
+      <Field>
         {t('importTitle')}
-        <input value={title} onChange={(e) => setTitle(e.target.value)} />
-      </label>
-      <label>
+        <Input data-modal-autofocus value={title} onChange={(e) => setTitle(e.target.value)} />
+      </Field>
+      <Field>
         {t('importFile')}
-        <input
-          type="file"
+        <FilePicker
+          disabled={busy}
           accept=".md,.txt,text/plain,text/markdown"
-          onChange={(e) => {
-            const file = e.target.files?.[0]
+          onFileSelect={(e) => {
+            const file = e
             if (file) {
               setTitle(file.name.replace(/\.[^.]+$/, ''))
-              void file.text().then(setText)
+              return file
+                .text()
+                .then(setText)
+                .catch((failure: unknown) => setError(String(failure)))
             }
           }}
+          label={t('chooseFile')}
         />
-      </label>
-      <label>
+      </Field>
+      <Field>
         {t('importText')}
-        <textarea
-          style={{ minHeight: 200 }}
+        <TextArea
+          className={cx('importText')}
           value={text}
           onChange={(e) => setText(e.target.value)}
         />
-      </label>
-      {result && <pre>{JSON.stringify(result, null, 2)}</pre>}
-      {error && <p role="alert">{error}</p>}
-      <footer>
-        <button onClick={close}>{t('cancel')}</button>
-        <button
+      </Field>
+      {result && <JsonView data={result} label={t('details')} t={t} />}
+      {error && <ErrorState>{error}</ErrorState>}
+      <FormActions>
+        <Button onClick={close}>{t('cancel')}</Button>
+        <Button
           disabled={busy || !title || !text}
           onClick={() =>
             void preview({ title, text })
@@ -1552,15 +1612,15 @@ function ImportForm({
           }
         >
           {t('preview')}
-        </button>
-        <button
-          className="primary"
+        </Button>
+        <Button
           disabled={busy || !title || !text}
           onClick={() => void save({ title, text })}
+          variant="primary"
         >
           {t('import')}
-        </button>
-      </footer>
+        </Button>
+      </FormActions>
     </Modal>
   )
 }
@@ -1582,31 +1642,31 @@ function RelationForm({
   const [kind, setKind] = useState('related')
   const [summary, setSummary] = useState('')
   return (
-    <Modal title={t('addRelation')} close={close}>
-      <div className="form-grid">
+    <Modal title={t('addRelation')} close={close} closeLabel={t('close')}>
+      <div className={cx('form-grid')}>
         {[
           [t('from'), from, setFrom],
           [t('to'), to, setTo],
         ].map(([label, value, setter], i) => (
-          <label key={i}>
+          <Field key={i}>
             {label as string}
-            <select
+            <Select
               value={value as string}
-              onChange={(e) => (setter as (v: string) => void)(e.target.value)}
+              onValueChange={(e) => (setter as (v: string) => void)(e)}
             >
-              <option value="">—</option>
+              <SelectOption value="">—</SelectOption>
               {entities.map((e) => (
-                <option key={e.id} value={e.id}>
+                <SelectOption key={e.id} value={e.id}>
                   {e.name}
-                </option>
+                </SelectOption>
               ))}
-            </select>
-          </label>
+            </Select>
+          </Field>
         ))}
       </div>
-      <label>
+      <Field>
         {t('relationKind')}
-        <select value={kind} onChange={(e) => setKind(e.target.value)}>
+        <Select data-modal-autofocus value={kind} onValueChange={(e) => setKind(e)}>
           {[
             'related',
             'participates',
@@ -1624,18 +1684,19 @@ function RelationForm({
             'trusts',
             'loves',
           ].map((k) => (
-            <option key={k}>{k}</option>
+            <SelectOption key={k} value={k}>
+              {k}
+            </SelectOption>
           ))}
-        </select>
-      </label>
-      <label>
+        </Select>
+      </Field>
+      <Field>
         {t('summary')}
-        <textarea value={summary} onChange={(e) => setSummary(e.target.value)} />
-      </label>
-      <footer>
-        <button onClick={close}>{t('cancel')}</button>
-        <button
-          className="primary"
+        <TextArea value={summary} onChange={(e) => setSummary(e.target.value)} />
+      </Field>
+      <FormActions>
+        <Button onClick={close}>{t('cancel')}</Button>
+        <Button
           disabled={busy || !from || !to}
           onClick={() =>
             void save({
@@ -1648,10 +1709,11 @@ function RelationForm({
               revision: 0,
             })
           }
+          variant="primary"
         >
           {t('save')}
-        </button>
-      </footer>
+        </Button>
+      </FormActions>
     </Modal>
   )
 }
@@ -1670,36 +1732,36 @@ function TaskForm({
   const [intent, setIntent] = useState('')
   const [sessionId, setSessionId] = useState('')
   return (
-    <Modal title={t('newTask')} close={close}>
-      <label>
+    <Modal title={t('newTask')} close={close} closeLabel={t('close')}>
+      <Field>
         {t('taskKind')}
-        <select value={kind} onChange={(e) => setKind(e.target.value)}>
+        <Select value={kind} onValueChange={(e) => setKind(e)}>
           {(['plan', 'write', 'revise', 'check'] as const).map((k) => (
-            <option key={k} value={k}>
+            <SelectOption key={k} value={k}>
               {t(k)}
-            </option>
+            </SelectOption>
           ))}
-        </select>
-      </label>
-      <label>
+        </Select>
+      </Field>
+      <Field>
         {t('intent')}
-        <textarea value={intent} onChange={(e) => setIntent(e.target.value)} />
-      </label>
-      <label>
+        <TextArea value={intent} onChange={(e) => setIntent(e.target.value)} />
+      </Field>
+      <Field>
         {t('sessionId')}
-        <input value={sessionId} onChange={(e) => setSessionId(e.target.value)} />
-      </label>
-      <p className="muted small">{t('taskInstructions')}</p>
-      <footer>
-        <button onClick={close}>{t('cancel')}</button>
-        <button
-          className="primary"
+        <Input value={sessionId} onChange={(e) => setSessionId(e.target.value)} />
+      </Field>
+      <p className={cx('muted small')}>{t('taskInstructions')}</p>
+      <FormActions>
+        <Button onClick={close}>{t('cancel')}</Button>
+        <Button
           disabled={busy || !intent.trim()}
           onClick={() => void save({ kind, intent, ...(sessionId ? { sessionId } : {}) })}
+          variant="primary"
         >
           {t('newTask')}
-        </button>
-      </footer>
+        </Button>
+      </FormActions>
     </Modal>
   )
 }

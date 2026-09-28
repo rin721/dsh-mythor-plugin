@@ -15,5 +15,6 @@
 | M11 | Story Graph | typed relations | Graph / 关系页 | 七种投影共用对象和编辑服务 |
 | M12 | 持续创作 | import/export/revise | 全流程 | 既有长篇可导入、审阅、续写、导出 |
 | M13 | Harness 复用 | Plugin adapters | Tool/Command/Slot | 安装、卸载、会话恢复均有效 |
+| M14 | 作者操作创作对象 | 全工作台及八类弹窗 | Harness UI 适配层 | 官方组件优先，补充组件跟随主题；键盘、输入、审阅与业务操作一致 |
 
 覆盖状态及执行命令只记录在 implementation/status.md；本表描述必须成立的行为，不代表已验证。

@@ -1,65 +1,12 @@
-import React, { useEffect, useRef } from 'react'
+import { useEffect, useRef } from 'react'
 import { EditorView, keymap, lineNumbers } from '@codemirror/view'
 import { EditorState } from '@codemirror/state'
 import { markdown } from '@codemirror/lang-markdown'
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
 import cytoscape from 'cytoscape'
 import type { Entity, Relation } from '../shared/contracts.ts'
+import css from './visualizations.module.css'
 
-export function Modal({
-  title,
-  children,
-  close,
-}: {
-  title: string
-  children: React.ReactNode
-  close: () => void
-}) {
-  const root = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    const previous = document.activeElement as HTMLElement | null
-    root.current?.querySelector<HTMLElement>('input,button,select,textarea')?.focus()
-    return () => previous?.focus()
-  }, [])
-  return (
-    <div
-      className="modal-backdrop"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget) close()
-      }}
-    >
-      <div
-        className="modal"
-        role="dialog"
-        aria-modal="true"
-        aria-label={title}
-        ref={root}
-        onKeyDown={(e) => {
-          if (e.key === 'Escape') close()
-          if (e.key === 'Tab') {
-            const items = [
-              ...(root.current?.querySelectorAll<HTMLElement>(
-                'button,input,select,textarea,[tabindex="0"]',
-              ) ?? []),
-            ].filter((x) => !x.hasAttribute('disabled'))
-            const first = items[0],
-              last = items[items.length - 1]
-            if (e.shiftKey && document.activeElement === first) {
-              e.preventDefault()
-              last?.focus()
-            } else if (!e.shiftKey && document.activeElement === last) {
-              e.preventDefault()
-              first?.focus()
-            }
-          }
-        }}
-      >
-        <h2>{title}</h2>
-        {children}
-      </div>
-    </div>
-  )
-}
 export function TextEditor({
   value,
   onChange,
@@ -89,11 +36,21 @@ export function TextEditor({
             if (update.docChanged) callback.current(update.state.doc.toString())
           }),
           EditorView.theme({
-            '&': { color: 'var(--m-text)', backgroundColor: 'var(--m-panel)' },
+            '&': {
+              color: 'var(--dsw-alias-label-primary)',
+              backgroundColor: 'var(--dsw-alias-bg-layer-1)',
+            },
             '.cm-gutters': {
-              backgroundColor: 'var(--m-bg)',
-              color: 'var(--m-muted)',
+              backgroundColor: 'var(--dsw-alias-bg-base)',
+              color: 'var(--dsw-alias-label-secondary)',
               border: 'none',
+            },
+            '.cm-cursor': { borderLeftColor: 'var(--dsw-alias-label-primary)' },
+            '.cm-selectionBackground, &.cm-focused .cm-selectionBackground': {
+              backgroundColor: 'var(--dsw-alias-state-business-tertiary)',
+            },
+            '.cm-content ::selection': {
+              backgroundColor: 'var(--dsw-alias-state-business-tertiary)',
             },
           }),
         ],
@@ -109,7 +66,7 @@ export function TextEditor({
         changes: { from: 0, to: view.state.doc.length, insert: value },
       })
   }, [value])
-  return <div className="editor" ref={root} />
+  return <div className={css.editor} ref={root} />
 }
 export function StoryGraph({
   nodes,
@@ -127,10 +84,17 @@ export function StoryGraph({
   const root = useRef<HTMLDivElement>(null)
   useEffect(() => {
     if (!root.current) return
-    const css = getComputedStyle(root.current)
-    const accent = css.getPropertyValue('--m-accent').trim() || '#28604e'
-    const text = css.getPropertyValue('--m-text').trim() || '#222'
-    const line = css.getPropertyValue('--m-line').trim() || '#ccc'
+    const token = (name: string) => {
+      const probe = document.createElement('span')
+      probe.style.color = `var(${name})`
+      root.current!.append(probe)
+      const value = getComputedStyle(probe).color
+      probe.remove()
+      return value
+    }
+    const accent = token('--dsw-alias-state-business-primary')
+    const text = token('--dsw-alias-label-primary')
+    const line = token('--dsw-alias-border-l2')
     const graph = cytoscape({
       container: root.current,
       elements: [
@@ -183,15 +147,41 @@ export function StoryGraph({
       ],
     })
     graph.on('tap', 'node', (e) => select(e.target.id()))
+    const updateTheme = () => {
+      const nextAccent = token('--dsw-alias-state-business-primary')
+      const nextText = token('--dsw-alias-label-primary')
+      const nextLine = token('--dsw-alias-border-l2')
+      graph
+        .style()
+        .selector('node')
+        .style({ 'background-color': nextAccent, color: nextText })
+        .selector('edge')
+        .style({ 'line-color': nextLine, 'target-arrow-color': nextLine })
+        .selector('.focused,.path')
+        .style({ 'border-color': nextText })
+        .update()
+    }
+    const theme = new MutationObserver(updateTheme)
+    theme.observe(document.documentElement, {
+      attributes: true,
+    })
+    theme.observe(document.body, {
+      attributes: true,
+    })
     const resize = new ResizeObserver(() => graph.resize())
     resize.observe(root.current)
     return () => {
       resize.disconnect()
+      theme.disconnect()
       graph.destroy()
     }
   }, [nodes, edges, focus, route])
   return (
-    <div className="graph" ref={root} aria-label="Story relationships; equivalent list follows" />
+    <div
+      className={css.graph}
+      ref={root}
+      aria-label="Story relationships; equivalent list follows"
+    />
   )
 }
 export function findPath(from: string, to: string, edges: Relation[]): string[] {

@@ -1,0 +1,18 @@
+.graph {
+  height: 440px;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-layer-1);
+}
+.editor {
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  min-height: 370px;
+  overflow: hidden;
+  background: var(--dsw-alias-bg-layer-1);
+}
+.editor :global(.cm-editor) {
+  min-height: 370px;
+}
+.editor :global(.cm-scroller) {
+  overflow: auto;
+  max-height: 65vh;
+}

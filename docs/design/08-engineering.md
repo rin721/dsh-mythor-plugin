@@ -11,6 +11,7 @@ TypeScript strict、ESM、pnpm；Host 和 Client 独立构建。Node 范围跟�
 - 不提交凭据、用户小说数据库、node_modules 或构建临时文件。
 - 新存储格式有 schemaVersion；新迁移必须提供前一版本 fixture 和失败恢复测试。
 - 依赖版本和 Harness 基线记录在锁文件及 ADR；不得直接导入旁边 checkout 的内部源码作为发布依赖。
+- UI 通用控件统一经过 client/ui，官方组件优先，缺失能力按 ADR 0002 适配；业务页面不得直接导入 Radix 或使用未经适配的表单控件。样式使用 CSS Modules，避免宽泛元素选择器影响官方组件。
 
 ## 测试层级
 
@@ -18,6 +19,8 @@ TypeScript strict、ESM、pnpm；Host 和 Client 独立构建。Node 范围跟�
 存储集成：真实 SQLite、重开持久化、原子提交、幂等、冲突、来源失效、迁移和备份恢复。
 Harness 契约：真实 Cordis tools/commands、公开 Remote、生命周期卸载、会话绑定、模型不得签发授权。
 UI：真实浏览器中的表单、审阅、图谱和取消；深浅主题及无障碍基本语义。
+
+组件测试：`pnpm test:ui` 使用独立 jsdom 配置，覆盖空选择、未知数值、中文受控输入、文件重复选择、表单提交及官方 Modal 内 Select 的 Escape/回焦。`pnpm check:ui` 检查导入与 JSX 边界；`pnpm test` 包含领域测试、组件测试和边界检查。jsdom 不验证真实几何布局，不能代替宿主 smoke。
 模型流程：固定重放响应，覆盖无凭据、无效输出、取消和恢复；真实模型 smoke 单独标记，不将 fixture 当成真实模型。
 
 ## 性能与诊断
