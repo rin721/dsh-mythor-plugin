@@ -15,6 +15,20 @@ dsh web
 
 安装可复制的发布包：`pnpm pack`，然后 `dsh plugin --profile web add <包路径.tgz>`。现有 Host 更换插件代码后需要重启。Desktop 使用自身插件管理器安装同一个 bundle，不通过 CLI 修改 Desktop profile。
 
+维护者发布新版本时，先将 `package.json` 的版本号更新并提交，再创建匹配的版本标签并推送：
+
+```powershell
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+GitHub Actions 会检查标签与 package 版本一致，运行检查和测试，构建 `.tgz` 并将其附加到 GitHub Release。仓库需允许 Actions 使用 `GITHUB_TOKEN` 写入 Releases（Settings → Actions → General → Workflow permissions）。发布后，用户按 Release 页面给出的 tarball URL 运行：
+
+```powershell
+dsh plugin --profile web add https://github.com/<owner>/<repo>/releases/download/v0.1.0/dsh-mythor-plugin-0.1.0.tgz
+dsh web
+```
+
 打开侧边栏 **Mythor**：新建项目 → 添加人物/设定或导入正文 → 审阅候选 → 接受提交。正文、人物、事件、关系、知识与规则共享一个领域模型。
 
 ## 创作与对话

@@ -1,0 +1,36 @@
+name: Release plugin bundle
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.22.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Verify tag matches package version
+        run: |
+          node -e 'const version = require("./package.json").version; const tag = process.env.GITHUB_REF_NAME; if (tag !== "v" + version) { console.error(`Tag ${tag} does not match package.json version ${version}`); process.exit(1) }'
+      - run: pnpm typecheck
+      - run: pnpm format:check
+      - run: pnpm test
+      - run: pnpm check:docs
+      - name: Build release tarball
+        run: pnpm pack
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" "dsh-mythor-plugin-*.tgz" --title "$GITHUB_REF_NAME" --generate-notes
