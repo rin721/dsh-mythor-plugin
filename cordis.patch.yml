@@ -1,0 +1,4 @@
+- insert:
+    - id: mythor
+      name: dsh-mythor-plugin
+      config: {}

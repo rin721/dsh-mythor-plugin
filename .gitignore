@@ -1,0 +1,9 @@
+node_modules/
+lib/
+.mythor/
+.test-output/
+test-results/
+playwright-report/
+*.sqlite*
+*.tgz
+.env*
