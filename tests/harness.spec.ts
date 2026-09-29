@@ -10,7 +10,7 @@ import type { WorkspaceRegistry } from '@deepseek-ai/dsh-workspace'
 import { WorkspaceNovels } from '../src/application/workspaces.ts'
 import { installNovelContext } from '../src/index.ts'
 import { descriptor } from '../src/shared/remote.ts'
-import type { ChangeSet, Snapshot } from '../src/shared/contracts.ts'
+import { EntitySchema, type ChangeSet, type Snapshot } from '../src/shared/contracts.ts'
 
 let root: string | undefined
 afterEach(() => {
@@ -185,6 +185,106 @@ it('isolates different Harness Workspaces and rejects mismatched sessions', asyn
   } as unknown as Agent
   await expect(novels.resolve(intruder)).rejects.toThrow('不属于有效的 Harness 工作区')
   await novels.close()
+})
+
+it('keeps Agent scene proposals outside Canon until author commit and shares the next context', async () => {
+  const { registry, a1, a1b } = fixture()
+  const novels = new WorkspaceNovels(registry, {}, new URL('../lib/worker.js', import.meta.url))
+  const ctx = new Context()
+  await ctx.plugin(SystemPrompt)
+  const reader = { ...a1b, ctx } as unknown as Agent
+  let dispose: (() => void) | undefined
+  try {
+    await novels.request(
+      a1,
+      { action: 'novel.enable', payload: { title: '影子车站' } },
+      { kind: 'author' },
+    )
+    const proposed = await novels.request(
+      a1,
+      {
+        action: 'changes.propose',
+        payload: {
+          baseRevision: 0,
+          summary: '从零散想法形成场景、正文与物品变化',
+          operations: [
+            { type: 'seed.put', value: { worldRule: '死者留下影子', desire: '寻找姐姐' } },
+            {
+              type: 'entity.put',
+              value: EntitySchema.parse({ id: 'lin', kind: 'character', name: '林烬' }),
+            },
+            {
+              type: 'entity.put',
+              value: EntitySchema.parse({ id: 'map', kind: 'item', name: '地图' }),
+            },
+            {
+              type: 'entity.put',
+              value: EntitySchema.parse({ id: 'station', kind: 'scene', name: '影子车站' }),
+            },
+            {
+              type: 'relation.put',
+              value: {
+                id: 'map_owner',
+                from: 'lin',
+                to: 'map',
+                kind: 'owns',
+                summary: '取得地图',
+                sources: [],
+                revision: 0,
+              },
+            },
+            {
+              type: 'document.put',
+              value: {
+                id: 'text',
+                entityId: 'station',
+                revisionId: 'text_v1',
+                title: '影子车站',
+                text: '林烬在车站取得姐姐留下的地图。',
+              },
+            },
+          ],
+        },
+      },
+      { kind: 'agent', sessionId: 's1' },
+    )
+    expect(proposed.ok).toBe(true)
+    const change = proposed.ok ? (proposed.value as unknown as ChangeSet) : undefined
+    const before = await novels.request(
+      a1b,
+      { action: 'snapshot', payload: {} },
+      { kind: 'author' },
+    )
+    expect(before.ok && (before.value as unknown as Snapshot).documents).toHaveLength(0)
+    const denied = await novels.request(
+      a1,
+      { action: 'changes.commit', payload: { id: change!.id, idempotencyKey: 'ungranted_scene' } },
+      { kind: 'agent', sessionId: 's1' },
+    )
+    expect(denied.ok).toBe(false)
+    const checked = await novels.request(
+      a1b,
+      { action: 'changes.validate', payload: { id: change!.id } },
+      { kind: 'author' },
+    )
+    expect(checked.ok).toBe(true)
+    const committed = await novels.request(
+      a1b,
+      { action: 'changes.commit', payload: { id: change!.id, idempotencyKey: 'accepted_scene' } },
+      { kind: 'author' },
+    )
+    expect(committed.ok).toBe(true)
+    dispose = installNovelContext(reader, novels)
+    const assembly = await ctx.systemPrompt.assemble({ agent: reader })
+    const text = assembly.contexts.find((entry) => entry.name === 'mythor:novel')?.text
+    expect(text).toContain('"revision":1')
+    expect(text).toContain('寻找姐姐')
+    expect(text).toContain('map_owner')
+    expect(text).toContain('林烬在车站取得姐姐留下的地图。')
+  } finally {
+    dispose?.()
+    await novels.close()
+  }
 })
 
 it('installs a backup atomically and leaves an unenabled workspace untouched on failure', async () => {
