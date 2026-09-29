@@ -6,14 +6,19 @@
 
 要求 Node.js 24+，DeepSeek Harness **0.1.7-rc.2**。其他 Harness 版本需要先运行兼容验证。
 
+从 Harness 仓库根目录执行以下 PowerShell 命令。插件会以本地目录依赖安装到 Web profile，因此 clone 路径需要保持可用；修改插件代码后重新构建并重启现有 Host。
+
 ```powershell
-pnpm install
+git clone https://github.com/rin721/dsh-mythor-plugin.git ..\dsh-mythor-plugin
+Push-Location ..\dsh-mythor-plugin
+pnpm install --frozen-lockfile
 pnpm build
-dsh plugin --profile web add .
-dsh web
+Pop-Location
+pnpm dsh plugin --profile web add ..\dsh-mythor-plugin
+pnpm dsh web
 ```
 
-安装可复制的发布包：`pnpm pack`，然后 `dsh plugin --profile web add <包路径.tgz>`。现有 Host 更换插件代码后需要重启。Desktop 使用自身插件管理器安装同一个 bundle，不通过 CLI 修改 Desktop profile。
+不要把 GitHub Release 的 `.tgz` 直链传给 `dsh plugin add`。pnpm 10.22 对这类外部 tarball URL 生成的锁文件记录缺少 `integrity`，Harness 会拒绝安装。GitHub Release 中的 `.tgz` 仍可用于手动下载和归档。Desktop 使用自身插件管理器安装同一个 bundle，不通过 CLI 修改 Desktop profile。
 
 维护者发布新版本时，先将 `package.json` 的版本号更新并提交，再创建匹配的版本标签并推送：
 
@@ -22,12 +27,7 @@ git tag v0.2.0
 git push origin v0.2.0
 ```
 
-GitHub Actions 会检查标签与 package 版本一致，运行检查和测试，构建 `.tgz` 并将其附加到 GitHub Release。仓库需允许 Actions 使用 `GITHUB_TOKEN` 写入 Releases（Settings → Actions → General → Workflow permissions）。发布后，用户按 Release 页面给出的 tarball URL 运行：
-
-```powershell
-dsh plugin --profile web add https://github.com/<owner>/<repo>/releases/download/v0.2.0/dsh-mythor-plugin-0.2.0.tgz
-dsh web
-```
+GitHub Actions 会检查标签与 package 版本一致，运行检查和测试，构建 `.tgz` 并将其附加到 GitHub Release。仓库需允许 Actions 使用 `GITHUB_TOKEN` 写入 Releases（Settings → Actions → General → Workflow permissions）。发布后，用户按上面的源码安装步骤 clone 对应版本并从本地目录安装；不要将 Release tarball URL 作为 pnpm 依赖。
 
 在 Harness 创建或选择一个工作区，开始会话后打开“对话 / 轨迹”旁的 **Mythor** 视图。每个 Harness 工作区承载一部小说；首次明确启用后，同工作区会话自动共享人物、正文、关系、规则、候选与历史。
 
