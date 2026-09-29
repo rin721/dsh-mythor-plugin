@@ -1,84 +1,57 @@
 # 实施与验证记录
 
-记录日期：2026-09-28。当前交付版本：0.1.0。设计目标、已实现能力和实际验证分开记录。`docs/goal.md` 保持原样。
+记录日期：2026-09-29。当前交付版本：0.2.0。本文只记录已实现能力、本轮实际证据和未验证边界；`docs/goal.md` 保持原样。
 
-## 交付状态
+## 0.2.0 交付状态
 
-| 阶段 | 状态 | 证据 |
+| 范围 | 状态 | 当前实现 |
 | --- | --- | --- |
-| 认知推导及文档体系 | 已落地 | design/01–10、ADR 0001、文档索引 |
-| Harness Plugin | 已实现并运行 | bundle patch、Host/Client、Tools/Command、Typert Remote、生命周期卸载测试 |
-| 领域与持久化 | 已实现 | 16 类对象、关系、正文不可变修订、SQLite Worker、原子提交、FTS5 |
-| 创作流程 | 已实现，模型质量待实测 | 阶段产物、Critic 建议、授权、取消、失败记录、恢复与导入提取任务 |
-| 工作台 | 已实现并做浏览器 smoke | 项目、对象、结构、正文、双时间线、图谱、检查、审阅、历史、任务 |
-| 发布包 | 已打包并安装启动 | tgz 经官方 CLI 安装至隔离 Web profile，宿主正常启动 |
+| 项目归属 | 已迁移 | Harness Workspace 是唯一项目空间；Host 由 Agent Session 的不可变 cwd 与 WorkspaceRegistry 解析当前小说 |
+| 小说状态 | 已迁移 | Project 聚合改为 NovelState；正式版本、StorySeed、对象、规则、正文、候选、历史和任务由 Mythor 维护 |
+| 存储 | 已迁移 | 每个工作区使用 `.mythor/novel.sqlite`；状态查询不创建目录，作者启用时才初始化并生成局部 `.gitignore` |
+| UI 承载 | 已迁移 | 十个创作页面注册到公开 `conversation.view`；首条消息前使用 `conversation.input.left` 的紧凑控件打开官方启用 Modal |
+| Agent 上下文 | 已迁移 | UI、命令、Tools、上下文和任务共用 WorkspaceNovelManager；每次 `system-prompt/assemble` 读取最新 ContextPack |
+| 实时失效 | 已实现 | Agent-scoped Typert stream 发布工作区 generation，Client 重读快照并在卸载时取消订阅 |
+| 初始化与导入 | 已实现基础闭环 | 支持空白新作、可缺省 StorySeed、文本/Markdown/TXT 与项目材料导入；材料先作为不可变来源和候选保存 |
+| 旧数据 | 已实现显式迁移 | v1 catalog/数据库只读快照迁入空工作区；v2 备份可写，v1/v2 可读；不自动推断或覆盖已有小说 |
+| 公共契约 | 已破坏性升级 | 请求不接受 projectId、novelId、Session ID 或数据库路径；移除项目 catalog、binding 和项目管理 Remote |
 
-## 自动化验证
+正式事实仍只通过已检查的 ChangeSet、作者审阅或有限授权及版本校验提交。模型工具不能启用项目、恢复备份、迁移旧库或签发授权。
 
-- `pnpm typecheck`：通过，开启 strict / noUnusedLocals / noUnusedParameters。
-- `pnpm test`：25 项通过；测试前自动构建，Harness 测试使用构建产物。
-- `pnpm check:docs`：通过，检查 14 个 Markdown 文件中的相对链接。
-- `pnpm format:check`：通过，工程格式检查。
-- `pnpm pack`：包含 Host、Worker、Client、类型声明、patch、图标、locale、README 与设计文档。
-- `.github/workflows/ci.yml`：配置 Node 24、Windows/Ubuntu 构建和测试；本地只实际运行了 Windows，尚无远端 CI 结果。
+## 本轮自动化验证
 
-| 测试文件 | 覆盖 |
-| --- | --- |
-| tests/store.spec.ts | 候选隔离、原子性、来源、版本冲突、幂等、撤销、重开、备份恢复、认知/叙述边界、权限、阶段、失败恢复、Critic 与授权 |
-| tests/harness.spec.ts | 真实 Cordis + Typert Gateway、完整插件加载/卸载、保存任务后的无 Agent 失败、固定调度夹具的失败/恢复/取消 |
-| tests/projections.spec.ts | 按世界时间派生行动路线，未知时间保留；共享事件形成故事线交叉 |
+在 Windows、Node 24、pnpm 10 上实际运行：
 
-固定调度夹具不调用模型，不能作为模型质量证据。
+- `pnpm typecheck`：通过。
+- `pnpm test`：通过。主测试 30 项，独立 jsdom UI 测试 10 项；测试前完成生产构建并执行 UI 边界检查。
+- `pnpm check:ui`：通过，业务页面没有绕过统一组件适配层。
+- `pnpm check:docs`：通过，检查 16 个 Markdown 文件的相对链接。
+- `pnpm pack --pack-destination .test-output`：通过，生成 `dsh-mythor-plugin-0.2.0.tgz`，包含 Host、Worker、Client、样式、类型、patch、locale、README 与设计文档。
 
-## 真实 Harness Web 验证
+自动化覆盖包括：未启用查询不创建文件、同工作区共享、不同工作区隔离、无效 Session 返回结构化状态、状态订阅、`system-prompt/assemble` 每次读取最新正式版本、显式旧库迁移、v1 `projectId` 到 `novelId` 转换、v1/v2 恢复、目标非空拒绝、种子 ChangeSet、候选与正式状态隔离、并发版本冲突、任务恢复和取消。旧库迁移使用含候选与未完成任务的合成夹具，不代表已经验证所有历史生产数据。
 
-基线包 `@deepseek-ai/dsh@0.1.7-rc.2`，初始源码核对基线 `21638c5631`。本机 Node 24.11.1、pnpm 10.22.0。使用 `.test-output/harness` 独立 DSH_HOME，业务数据在 `.test-output/live-data`，没有更改用户的正式 profile。
+UI 测试覆盖适配组件的受控输入、文件选择、Select 键盘行为和 Modal 回焦、首条消息前的紧凑启用控件、无工作区的安静空状态，以及实体编辑发生版本冲突时保留输入。Host 测试覆盖 Agent 创建期间 WorkspaceRegistry 尚未登记新 Session ID 时的扩展安装判断；正式请求仍执行会话归属校验。官方 UI 发布包缺失声明的 `index.js.map`，Vite 会打印 sourcemap 警告；测试和构建仍通过。
 
-实际走通：创建项目 → 新建林烬人物候选 → 检查与接受 → 导入两个 Markdown 章节并预览拆分 → 接受原文 → 在 CodeMirror 中读取第一章 → 创建顾清 → 创建人物关系 → 图谱聚焦及路径追踪 → 查看 v1–v4 提交历史 → 恢复导入提取任务创建 Harness 会话 → 取消任务。测试小说仅是自建验收数据。
+## 真实 Harness 0.1.7-rc.2 验证
 
-集成过程中发现并修正：Client 需在 remote.mythor 注入作用域调用；Harness RemoteResult 与业务 ApiResult 需要分别解包。只测试直接 Gateway 无法发现这两个 Client 问题，因此保留真实宿主 smoke 为发布要求。
+使用隔离的 `.test-output/harness` profile，通过官方 CLI 安装本轮 tgz 并启动 Web Host，没有修改用户正式 profile。实际确认：
 
-发布包复验：按锁文件重新安装依赖，重新打包并通过官方 CLI 安装 tgz；重启隔离宿主后读取原有 v4 项目，人物关系聚焦与路径追踪正常。恢复原提取任务时，宿主因没有模型配置而报告 prompt variable model 缺值；Mythor 将该异步错误持久化为 read / failed，任务详情可读取。此次重新连接后未观察到新增浏览器控制台错误。截图保存在本地忽略目录 `.test-output/mythor-workbench.png`，不随发布包分发。
+- Mythor 出现在原生“对话 / 轨迹”工作区域中的第三个 Tab，没有独立顶层应用或第二套项目选择器。
+- 未启用工作区能显示初始化说明、从想法开始、旧版迁移和备份恢复入口。
+- Client 通过 Session scope 调用 `remote.mythor`，Agent lookup 使用 Harness 公共 `SessionId` 线路类型；刷新后状态请求与订阅建立成功，没有 Gateway provider mismatch。
+- Host 直接持有 Typert 严格描述符注册；真实 Web 状态请求已接受 Client scope 自动注入的 `agentId`，不再回退到 SRC 推断并报 `unexpected "agentId"`。
+- 已有对话只显示 Mythor 原生工作区；无有效工作区的真实 Web 页面显示选择工作区说明，没有红色错误反馈。首条消息前的紧凑启用控件及官方 Modal 已由浏览器组件测试验证，未在本轮真实 Web 中越过首次模型配置弹窗复验。
+- 只读取未启用状态不会在当前工作区创建 `.mythor`。
+- tgz 能由 Harness 插件命令安装。独立 pnpm profile 安装时会报告宿主 peer 依赖缺失警告，运行时由 Harness profile 提供这些共享模块。
 
-## 长篇数据层基准
+本轮没有在仓库工作区点击“启用”，以免制造本地小说数据；启用后的存储、共享和迁移由自动化临时目录覆盖。
 
-命令：`pnpm benchmark`。Windows，AMD Ryzen 7 7735HS，Node 24.11.1。输入为 300 万字符正文、3,000 场景、10,000 对象、50,000 关系。
+## 尚未验证
 
-| 项目 | 本次测量 |
-| --- | ---: |
-| 分批写入及索引 | 12,194ms |
-| 中文查询 | 52ms |
-| 局部关系图查询 | 320ms |
-| 上下文组装 | 368ms |
-| 完整快照 | 529ms |
-| 进程 RSS | 529MB |
+1. 当前隔离 profile 未配置可控模型，因此没有执行真实模型的渐进提问、文学质量、材料分批理解和 system prompt 内容质量验收。
+2. 同工作区多真实会话、恢复会话、子 Agent 与移动目录后的端到端行为尚未在 Web 中逐项操作；自动化验证了作用域解析、共享、隔离和路径随目录存储的实现。
+3. 十个页面和全部弹窗在 0.2.0 下没有重新执行完整人工回归；现有 UI 组件与版本冲突回归通过，0.1.x 的人工流程不能算作本版证据。
+4. 深色主题、窄屏、Desktop、跨平台 CI、长时间运行和大规模浏览器性能未在本轮实测。
+5. 旧授权失效、未完成任务转为 pending 和原库不变由迁移代码与合成测试覆盖，尚未使用真实 0.1.x 用户数据库复验。
 
-这是单次本机数据层测量，不是 p95，也不包含网络或浏览器绘制。完整快照包含正文和候选，长篇 UI 首屏与内存仍需优化；不能据此宣称浏览器首屏 2 秒目标已经达到。
-
-## 已知边界与后续顺序
-
-1. 当前环境没有配置模型密钥，未验证真实模型从规划到完成长篇场景的质量；已验证宿主会话创建及固定调度的恢复机制。文学合理性仍属于作者和 Critic 的判断。
-2. 已运行 Web 版；深色主题的后续实测见下方 UI 迁移记录。Desktop 安装、跨平台 CI 与长期运行压力测试尚未实测。
-3. UI 操作后刷新；其他会话修改需手动刷新。大项目仍读取完整快照，下一步应实现按对象和正文分页、增量全文索引及订阅。当前不是多作者实时协作系统。
-4. 七类关系视图共享同一数据源；行动路线是带事件与地点的时间序列，交叉是共享事件的故事线列表与关系图，未提供地理底图、可拖拽时间泳道或布局持久化。
-5. 结构化规则检查已实现，复杂自然语言规则输出 unknown；正文改变自动生成来源复查任务，完整规则依赖调度与自动经验记忆仍为扩展方向。
-6. 新格式为 SQLite schema 1；备份恢复验证通过，尚无已发布旧格式迁移路径。没有分支合并、外部文档双向同步、向量服务和第三方知识库连接。
-
-维护时优先完成真实模型回放验收、分页与增量索引，再扩展规则、导入适配和可视化，保持领域契约不分叉。
-
-## Harness UI 全量迁移（2026-09-29）
-
-已迁移十个工作台页面与项目、实体、导入、关系、任务、授权、绑定、来源八类弹窗。通用控件统一经过 client/ui：官方公开组件优先，Radix Select 使用官方 Button/MenuSurface，其他缺项由 React 薄封装补齐。旧 Modal、style.ts 与通用控件外观已移除，CSS Modules 随客户端内嵌并在挂载/卸载时注册/移除。正文、图谱和来源标记使用宿主主题；不改变领域公共契约或数据库格式。
-
-本轮自动化证据：
-
-- `pnpm typecheck`、`pnpm format:check`、`pnpm check:docs`：通过；文档链接检查覆盖 15 个 Markdown 文件。
-- `pnpm test`：26 项 Node 测试与 8 项独立 jsdom UI 测试通过，并执行 UI 边界检查。新增产物检查确认官方 UI 与 React 外置、Radix 按需打包；组件测试覆盖空选择、未知数字、中文输入、文件重复选择与读取失败、提交按钮、箭头键、官方 Modal 内 Escape/回焦、样式生命周期；App 测试确认版本冲突在弹窗内反馈且不清除输入、不直接提交事实。
-- 官方 UI 发布包缺失其声明的 index.js.map，Vite 会报告该上游 sourcemap 警告；不影响测试结果或插件构建。为执行真实官方组件测试，按官方独立消费依赖规则补齐了开发依赖，没有打入另一份官方 UI。
-- `pnpm pack` 构建发布包，并安装到已有隔离 Harness Web profile；真实宿主解析共享 UI 模块和 CSS Modules 正常。未修改用户正式 profile。
-
-真实浏览器使用新建的「Harness UI 全量迁移验收」项目，实际走通项目创建 → 两个人物候选 → 检查/审阅/接受 → 两章原文预览与导入 → 正文编辑及 DiffBlock 比较 → 关系候选与接受 → 图谱聚焦及路径追踪 → 七种投影切换 → 世界检查与双时间线 → 历史详情/补偿候选/拒绝 → 任务创建/有限范围授权/恢复/取消。绑定弹窗仅验证打开、输入入口与取消，没有将验收项目绑定到用户会话。
-
-来源弹窗所需 SourceRef 经同一应用服务生成测试候选，再在 UI 明确接受；未依赖模型提取。版本冲突使用同一应用服务提交一项已检查、内容不变的测试 ChangeSet，令编辑页面基线过期；提交被 revision-conflict 拒绝，编辑输入保留，正式对象未被覆盖。测试内容、脚本、数据库和安装 profile 均留在忽略的 .test-output 内。
-
-已检查浅色/深色控件、深色 Modal 内 Select 材质和层级，以及 600px 宽正文布局；恢复了原来的「跟随系统」主题与浏览器尺寸。任务因测试 profile 缺少模型配置出现持久化的 failed 状态，再验证恢复和取消；不将此流程作为真实模型质量证据。Desktop、跨平台 CI、长期压力和大规模浏览器性能仍未实测。
+后续验收应优先使用可控模型在独立 Harness 工作区走通“对话产生候选 → Mythor 审阅提交 → 下一轮对话读取新版本”，再补多会话、子 Agent、目录移动和十页完整回归。

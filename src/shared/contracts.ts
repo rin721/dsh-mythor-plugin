@@ -73,6 +73,17 @@ export const DocumentSchema = z
     parentRevisionId: Id.optional(),
   })
   .strict()
+export const StorySeedSchema = z
+  .object({
+    worldRule: z.string().max(30_000).default(''),
+    protagonist: z.string().max(30_000).default(''),
+    desire: z.string().max(30_000).default(''),
+    obstacle: z.string().max(30_000).default(''),
+    stakes: z.string().max(30_000).default(''),
+    centralQuestion: z.string().max(30_000).default(''),
+    notes: z.string().max(100_000).default(''),
+  })
+  .strict()
 export const OperationSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('entity.put'), value: EntitySchema }).strict(),
   z.object({ type: z.literal('entity.delete'), id: Id }).strict(),
@@ -80,19 +91,22 @@ export const OperationSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('relation.delete'), id: Id }).strict(),
   z.object({ type: z.literal('document.put'), value: DocumentSchema }).strict(),
   z.object({ type: z.literal('document.delete'), id: Id }).strict(),
+  z.object({ type: z.literal('seed.put'), value: StorySeedSchema }).strict(),
 ])
 export type Entity = z.infer<typeof EntitySchema>
 export type Relation = z.infer<typeof RelationSchema>
 export type Document = z.infer<typeof DocumentSchema>
 export type Operation = z.infer<typeof OperationSchema>
 export type SourceRef = z.infer<typeof Source>
+export type StorySeed = z.infer<typeof StorySeedSchema>
 export type Json = z.infer<ReturnType<typeof z.json>>
-export interface Project {
+export interface NovelState {
   id: string
-  name: string
+  title: string
   revision: number
-  archived: boolean
+  status: 'active' | 'paused'
   createdAt: string
+  seed: StorySeed
 }
 export interface Finding {
   code: string
@@ -114,7 +128,7 @@ export const CritiqueSchema = z
   .strict()
 export interface ChangeSet {
   id: string
-  projectId: string
+  novelId: string
   baseRevision: number
   taskId?: string
   summary: string
@@ -137,7 +151,7 @@ export const STAGES = [
 export type Stage = (typeof STAGES)[number]
 export interface WorkflowRun {
   id: string
-  projectId: string
+  novelId: string
   sessionId?: string
   kind: 'plan' | 'write' | 'revise' | 'check' | 'import'
   intent: string
@@ -152,7 +166,7 @@ export interface WorkflowRun {
 export const WorkflowSchema = z
   .object({
     id: Id,
-    projectId: Id,
+    novelId: Id,
     sessionId: Id.optional(),
     kind: z.enum(['plan', 'write', 'revise', 'check', 'import']),
     intent: z.string(),
@@ -168,7 +182,7 @@ export const WorkflowSchema = z
 export const ChangeSetSchema = z
   .object({
     id: Id,
-    projectId: Id,
+    novelId: Id,
     baseRevision: z.number().int().nonnegative(),
     taskId: Id.optional(),
     summary: z.string(),
@@ -191,7 +205,7 @@ export const CommitSchema = z
   })
   .strict()
 export interface Snapshot {
-  project: Project
+  novel: NovelState
   entities: Entity[]
   relations: Relation[]
   documents: Document[]
@@ -210,9 +224,11 @@ export interface Commit {
 }
 export type Actor = { kind: 'author' } | { kind: 'agent'; sessionId: string }
 export const ACTIONS = [
-  'project.list',
-  'project.create',
-  'project.archive',
+  'novel.status',
+  'novel.enable',
+  'novel.update',
+  'legacy.list',
+  'legacy.migrate',
   'snapshot',
   'query',
   'context',
@@ -237,13 +253,10 @@ export const ACTIONS = [
   'export',
   'backup',
   'restore',
-  'binding.get',
-  'binding.set',
 ] as const
 export const RequestSchema = z
   .object({
     action: z.enum(ACTIONS),
-    projectId: Id.optional(),
     payload: z.record(z.string(), z.json()).default({}),
   })
   .strict()
@@ -252,8 +265,9 @@ export type ApiResult =
   | { ok: true; value: Json }
   | { ok: false; error: { code: string; message: string; details?: Json } }
 export interface ContextPack {
-  projectId: string
+  novelId: string
   revision: number
+  seed: StorySeed
   perspective: string
   focus: string[]
   time?: number
@@ -262,6 +276,7 @@ export interface ContextPack {
   relations: Relation[]
   excerpts: { documentId: string; revisionId: string; text: string }[]
   gaps: string[]
+  pending: { changes: string[]; tasks: string[] }
   truncated: boolean
 }
 export interface Limits {

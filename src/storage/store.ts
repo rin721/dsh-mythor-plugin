@@ -24,7 +24,7 @@ import {
   type Json,
   type Limits,
   type Operation,
-  type Project,
+  type NovelState,
   type Relation,
   type Request,
   type Snapshot,
@@ -56,8 +56,7 @@ const TABLES = [
 type Table = (typeof TABLES)[number]
 
 export class Store {
-  private readonly catalog: DatabaseSync
-  private readonly open = new Map<string, DatabaseSync>()
+  private readonly database: DatabaseSync
   readonly limits: Limits
   constructor(
     readonly root: string,
@@ -65,47 +64,35 @@ export class Store {
   ) {
     this.limits = { ...DEFAULT_LIMITS, ...limits }
     mkdirSync(root, { recursive: true })
-    this.catalog = new DatabaseSync(join(root, 'catalog.sqlite'))
-    this.catalog.exec(
-      'PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS bindings(id TEXT PRIMARY KEY, data TEXT NOT NULL)',
-    )
-  }
-  close() {
-    for (const db of this.open.values()) db.close()
-    this.open.clear()
-    this.catalog.close()
-  }
-  private db(id: string): DatabaseSync {
-    Id.parse(id)
-    if (this.open.has(id)) return this.open.get(id)!
-    requireValue(
-      this.catalog.prepare('SELECT id FROM projects WHERE id=?').get(id),
-      'project-not-found',
-      '小说项目不存在',
-    )
-    const db = new DatabaseSync(join(this.root, `${id}.sqlite`))
-    const version = Number(db.prepare('PRAGMA user_version').get()?.user_version)
-    if (version > 1) {
-      db.close()
+    this.database = new DatabaseSync(join(root, 'novel.sqlite'))
+    const version = Number(this.database.prepare('PRAGMA user_version').get()?.user_version)
+    if (version > 2) {
+      this.database.close()
       throw new MythorError('future-schema', '数据库来自更新版本，拒绝写入')
     }
-    db.exec(
+    this.database.exec(
       'PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=3000; CREATE TABLE IF NOT EXISTS meta(id TEXT PRIMARY KEY, data TEXT NOT NULL)',
     )
     for (const table of TABLES)
-      db.exec(`CREATE TABLE IF NOT EXISTS ${table}(id TEXT PRIMARY KEY, data TEXT NOT NULL)`)
-    db.exec(
-      'CREATE TABLE IF NOT EXISTS receipts(id TEXT PRIMARY KEY, data TEXT NOT NULL); CREATE VIRTUAL TABLE IF NOT EXISTS search USING fts5(id UNINDEXED, kind UNINDEXED, tokens); PRAGMA user_version=1',
+      this.database.exec(
+        `CREATE TABLE IF NOT EXISTS ${table}(id TEXT PRIMARY KEY, data TEXT NOT NULL)`,
+      )
+    this.database.exec(
+      'CREATE TABLE IF NOT EXISTS receipts(id TEXT PRIMARY KEY, data TEXT NOT NULL); CREATE VIRTUAL TABLE IF NOT EXISTS search USING fts5(id UNINDEXED, kind UNINDEXED, tokens); PRAGMA user_version=2',
     )
-    this.open.set(id, db)
-    for (const task of this.all<WorkflowRun>(db, 'tasks'))
+    for (const task of this.all<WorkflowRun>(this.database, 'tasks'))
       if (task.status === 'running')
-        this.put(db, 'tasks', task.id, {
+        this.put(this.database, 'tasks', task.id, {
           ...task,
           status: 'pending',
           error: '运行中断，可从已保存阶段恢复',
         })
-    return db
+  }
+  close() {
+    this.database.close()
+  }
+  private db(): DatabaseSync {
+    return this.database
   }
   private all<T>(db: DatabaseSync, table: Table): T[] {
     return db
@@ -125,19 +112,23 @@ export class Store {
       `INSERT INTO ${table}(id,data) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data`,
     ).run(id, stringify(value))
   }
-  private project(db: DatabaseSync): Project {
-    return decode<Project>(
-      requireValue(db.prepare("SELECT data FROM meta WHERE id='project'").get()),
+  private novel(db: DatabaseSync): NovelState {
+    return decode<NovelState>(
+      requireValue(
+        db.prepare("SELECT data FROM meta WHERE id='novel'").get(),
+        'novel-not-enabled',
+        '当前 Harness 项目尚未启用 Mythor',
+      ),
     )
   }
-  private setProject(db: DatabaseSync, project: Project) {
+  private setNovel(db: DatabaseSync, novel: NovelState) {
     db.prepare(
-      "INSERT INTO meta(id,data) VALUES('project',?) ON CONFLICT(id) DO UPDATE SET data=excluded.data",
-    ).run(stringify(project))
+      "INSERT INTO meta(id,data) VALUES('novel',?) ON CONFLICT(id) DO UPDATE SET data=excluded.data",
+    ).run(stringify(novel))
   }
   private snapshot(db: DatabaseSync): Snapshot {
     return {
-      project: this.project(db),
+      novel: this.novel(db),
       entities: this.all(db, 'entities'),
       relations: this.all(db, 'relations'),
       documents: this.all(db, 'documents'),
@@ -152,72 +143,63 @@ export class Store {
     if (actor.kind === 'agent') {
       if (
         [
-          'project.create',
-          'project.archive',
+          'novel.enable',
+          'novel.update',
           'grant',
           'restore',
-          'binding.set',
           'history.undo',
           'task.finish',
           'task.fail',
         ].includes(req.action)
       )
         throw new MythorError('author-only', '该操作只能由作者发起')
-      if (req.projectId) {
-        const binding = this.binding(actor.sessionId)
-        if (binding?.projectId !== req.projectId)
-          throw new MythorError(
-            'project-scope',
-            '模型请求与当前会话绑定项目不一致，请作者先使用 /mythor project use',
-          )
+    }
+    const db = this.db()
+    if (req.action === 'novel.status') {
+      const row = db.prepare("SELECT data FROM meta WHERE id='novel'").get()
+      return safeJson({ enabled: Boolean(row), ...(row ? { novel: decode<NovelState>(row) } : {}) })
+    }
+    if (req.action === 'novel.enable') {
+      const existing = db.prepare("SELECT data FROM meta WHERE id='novel'").get()
+      if (existing) return safeJson(decode<NovelState>(existing))
+      const title = z.string().trim().min(1).max(200).parse(p.title)
+      const novel: NovelState = {
+        id: uid(),
+        title,
+        revision: 0,
+        status: 'active',
+        createdAt: now(),
+        seed: {
+          worldRule: '',
+          protagonist: '',
+          desire: '',
+          obstacle: '',
+          stakes: '',
+          centralQuestion: '',
+          notes: '',
+        },
       }
-    }
-    if (req.action === 'project.list')
-      return safeJson(
-        this.catalog
-          .prepare('SELECT data FROM projects')
-          .all()
-          .map((row) => {
-            const project = decode<Project>(row)
-            return this.project(this.db(project.id))
-          }),
-      )
-    if (req.action === 'project.create') {
-      const name = z.string().trim().min(1).max(200).parse(p.name)
-      const project: Project = { id: uid(), name, revision: 0, archived: false, createdAt: now() }
-      this.catalog.prepare('INSERT INTO projects VALUES(?,?)').run(project.id, stringify(project))
-      this.setProject(this.db(project.id), project)
-      return safeJson(project)
-    }
-    if (req.action === 'binding.get')
-      return safeJson(
-        this.binding(actor.kind === 'agent' ? actor.sessionId : Id.parse(p.sessionId)) ?? null,
-      )
-    if (req.action === 'binding.set') {
-      const sessionId = Id.parse(p.sessionId)
-      const projectId = Id.parse(req.projectId)
-      this.db(projectId)
-      const value = { projectId, focus: z.array(Id).default([]).parse(p.focus) }
-      this.catalog
-        .prepare(
-          'INSERT INTO bindings VALUES(?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data',
-        )
-        .run(sessionId, stringify(value))
-      return safeJson(value)
+      this.setNovel(db, novel)
+      return safeJson(novel)
     }
     if (req.action === 'restore') return this.restore(p)
-    const projectId = Id.parse(req.projectId)
-    const db = this.db(projectId)
-    const project = this.project(db)
+    const novel = this.novel(db)
     if (
-      project.archived &&
-      !['snapshot', 'query', 'history', 'export', 'backup', 'project.archive'].includes(req.action)
+      novel.status === 'paused' &&
+      !['snapshot', 'query', 'history', 'export', 'backup', 'novel.update'].includes(req.action)
     )
-      throw new MythorError('project-archived', '项目已归档，请先恢复项目')
+      throw new MythorError('novel-paused', '小说创作已暂停，请先恢复')
     switch (req.action) {
-      case 'project.archive':
-        this.setProject(db, { ...project, archived: z.boolean().parse(p.archived) })
-        return safeJson(this.project(db))
+      case 'novel.update': {
+        const update = z
+          .object({
+            title: z.string().trim().min(1).max(200).optional(),
+            status: z.enum(['active', 'paused']).optional(),
+          })
+          .parse(p)
+        this.setNovel(db, { ...novel, ...update })
+        return safeJson(this.novel(db))
+      }
       case 'snapshot':
         return safeJson(this.snapshot(db))
       case 'query':
@@ -250,7 +232,7 @@ export class Store {
             artifacts: { ...task.artifacts, validate: safeJson(findings) },
           })
         }
-        return safeJson({ revision: project.revision, findings })
+        return safeJson({ revision: novel.revision, findings })
       }
       case 'changes.propose':
         return safeJson(this.propose(db, p, actor))
@@ -347,15 +329,13 @@ export class Store {
         }
         if (!cancel && p.sessionId) {
           if (actor.kind !== 'author')
-            throw new MythorError('author-only', '任务会话只能由作者重新绑定')
+            throw new MythorError('author-only', '任务会话只能由作者重新指定')
           next.sessionId = Id.parse(p.sessionId)
-          if (this.binding(next.sessionId)?.projectId !== projectId)
-            throw new MythorError('project-scope', '请先将会话绑定至任务所在项目')
           if (next.sessionId !== task.sessionId)
             db.prepare('DELETE FROM grants WHERE id=?').run(task.id)
         }
-        if (!cancel && task.baseRevision !== project.revision) {
-          next.baseRevision = project.revision
+        if (!cancel && task.baseRevision !== novel.revision) {
+          next.baseRevision = novel.revision
           next.stage = 'read'
           next.artifacts = {}
           next.critique = undefined
@@ -382,7 +362,7 @@ export class Store {
           this.all<Entity>(db, 'entities').map((e) => [e.id, e.narrativeOrder ?? Infinity]),
         )
         return {
-          name: `${project.name}.md`,
+          name: `${novel.title}.md`,
           text: this.all<Document>(db, 'documents')
             .sort(
               (a, b) =>
@@ -400,10 +380,6 @@ export class Store {
     }
   }
 
-  private binding(sessionId: string): { projectId: string; focus: string[] } | undefined {
-    const row = this.catalog.prepare('SELECT data FROM bindings WHERE id=?').get(sessionId)
-    return row ? decode(row) : undefined
-  }
   private ownedTask(db: DatabaseSync, id: string, actor: Actor): WorkflowRun {
     const task = this.get<WorkflowRun>(db, 'tasks', id)
     if (actor.kind === 'agent' && task.sessionId !== actor.sessionId)
@@ -419,10 +395,10 @@ export class Store {
         operations: z.array(OperationSchema).min(1).max(10_000),
       })
       .parse(p)
-    const project = this.project(db)
-    if (input.baseRevision !== project.revision)
+    const novel = this.novel(db)
+    if (input.baseRevision !== novel.revision)
       throw new MythorError('revision-conflict', '项目已更新，请重新读取', {
-        currentRevision: project.revision,
+        currentRevision: novel.revision,
       })
     if (input.taskId) {
       const task = this.ownedTask(db, input.taskId, actor)
@@ -431,7 +407,10 @@ export class Store {
     }
     const touched = new Set<string>()
     for (const op of input.operations) {
-      const key = `${op.type.split('.')[0]}:${'value' in op ? op.value.id : op.id}`
+      const key =
+        op.type === 'seed.put'
+          ? 'seed'
+          : `${op.type.split('.')[0]}:${'value' in op ? op.value.id : op.id}`
       if (touched.has(key))
         throw new MythorError('duplicate-operation', '一个变更集中同一对象只能修改一次')
       touched.add(key)
@@ -439,7 +418,7 @@ export class Store {
     const change: ChangeSet = {
       ...input,
       id: uid(),
-      projectId: project.id,
+      novelId: novel.id,
       status: 'pending',
       createdAt: now(),
     }
@@ -452,7 +431,7 @@ export class Store {
     const findings = validate(next, [...this.all<Document>(db, 'revisions'), ...next.documents])
     if (change.taskId)
       findings.push(...(this.get<WorkflowRun>(db, 'tasks', change.taskId).critique ?? []))
-    if (change.baseRevision !== snapshot.project.revision)
+    if (change.baseRevision !== snapshot.novel.revision)
       findings.unshift({
         code: 'revision-conflict',
         severity: 'error',
@@ -482,7 +461,7 @@ export class Store {
           })
       }
     return {
-      revision: snapshot.project.revision,
+      revision: snapshot.novel.revision,
       findings,
       affected: impacted(snapshot, change.operations),
     }
@@ -526,9 +505,11 @@ export class Store {
             ? [op.value.from, op.value.to]
             : op.type === 'document.put'
               ? [op.value.entityId ?? op.value.id]
-              : 'value' in op
-                ? [op.value.id]
-                : [op.id],
+              : op.type === 'seed.put'
+                ? []
+                : 'value' in op
+                  ? [op.value.id]
+                  : [op.id],
         )
         if (
           !grant ||
@@ -537,8 +518,8 @@ export class Store {
         )
           throw new MythorError('grant-required', '任务没有覆盖本次修改的有效作者授权')
       }
-      const project = this.project(db)
-      const revision = project.revision + 1
+      const novel = this.novel(db)
+      const revision = novel.revision + 1
       const inverse: Operation[] = []
       const staleIds = new Set<string>()
       const changedDocuments = new Set<string>()
@@ -558,7 +539,7 @@ export class Store {
           )
           if (op.type === 'relation.put') this.put(db, 'relations', id, { ...op.value, revision })
           else db.prepare('DELETE FROM relations WHERE id=?').run(id)
-        } else {
+        } else if (op.type === 'document.put' || op.type === 'document.delete') {
           const id = 'value' in op ? op.value.id : op.id
           const old = this.maybe<Document>(db, 'documents', id)
           inverse.unshift(
@@ -569,6 +550,8 @@ export class Store {
             this.put(db, 'revisions', op.value.revisionId, op.value)
           } else db.prepare('DELETE FROM documents WHERE id=?').run(id)
           if (old) changedDocuments.add(id)
+        } else {
+          inverse.unshift({ type: 'seed.put', value: novel.seed })
         }
       }
       // Reconcile after all operations so operation order cannot revive old extraction.
@@ -601,7 +584,12 @@ export class Store {
       }
       this.put(db, 'commits', commit.id, commit)
       this.put(db, 'changes', change.id, { ...change, status: 'committed', revision })
-      this.setProject(db, { ...project, revision })
+      const seed = change.operations.find((op) => op.type === 'seed.put')
+      this.setNovel(db, {
+        ...novel,
+        revision,
+        ...(seed?.type === 'seed.put' ? { seed: seed.value } : {}),
+      })
       if (staleIds.size)
         this.startTask(
           db,
@@ -632,7 +620,11 @@ export class Store {
     const commit = this.get<Commit>(db, 'commits', id)
     const history = this.all<Commit>(db, 'commits')
     const keys = (ops: Operation[]) =>
-      ops.map((op) => `${op.type.split('.')[0]}:${'value' in op ? op.value.id : op.id}`)
+      ops.map((op) =>
+        op.type === 'seed.put'
+          ? 'seed'
+          : `${op.type.split('.')[0]}:${'value' in op ? op.value.id : op.id}`,
+      )
     const targets = new Set(keys([...commit.operations, ...commit.inverse]))
     if (
       history.some(
@@ -657,7 +649,7 @@ export class Store {
     return this.propose(
       db,
       {
-        baseRevision: this.project(db).revision,
+        baseRevision: this.novel(db).revision,
         summary: `撤销：${commit.summary}`,
         operations: safeJson(operations),
       },
@@ -676,8 +668,8 @@ export class Store {
     const task: WorkflowRun = {
       ...input,
       id: uid(),
-      projectId: this.project(db).id,
-      baseRevision: this.project(db).revision,
+      novelId: this.novel(db).id,
+      baseRevision: this.novel(db).revision,
       sessionId: actor.kind === 'agent' ? actor.sessionId : input.sessionId,
       stage: 'read',
       status: 'pending',
@@ -691,18 +683,27 @@ export class Store {
       .object({
         title: z.string().min(1),
         text: z.string().min(1).max(this.limits.maxImportChars),
+        materialKind: z
+          .enum(['manuscript', 'outline', 'characters', 'world', 'notes'])
+          .default('manuscript'),
         preview: z.boolean().default(false),
       })
       .parse(p)
-    const parts = input.text
-      .replace(/^\uFEFF/, '')
-      .split(/(?=^#{1,3} .+$|^第[一二三四五六七八九十百千\d]+[章节卷].*$)/m)
-      .filter((v) => v.trim())
+    const normalized = input.text.replace(/^\uFEFF/, '')
+    const parts =
+      input.materialKind === 'manuscript'
+        ? normalized
+            .split(/(?=^#{1,3} .+$|^第[一二三四五六七八九十百千\d]+[章节卷].*$)/m)
+            .filter((v) => v.trim())
+        : [normalized]
     const documents = parts.map((part, index) => {
       const lines = part.trim().split('\n')
-      const title = /^(#{1,3} |第)/.test(lines[0])
-        ? lines.shift()!.replace(/^#+\s*/, '')
-        : `${input.title} ${index + 1}`
+      const title =
+        input.materialKind === 'manuscript' && /^(#{1,3} |第)/.test(lines[0])
+          ? lines.shift()!.replace(/^#+\s*/, '')
+          : input.materialKind === 'manuscript'
+            ? `${input.title} ${index + 1}`
+            : input.title
       return { id: uid(), revisionId: uid(), title, text: lines.join('\n').trim() }
     })
     if (input.preview)
@@ -712,23 +713,31 @@ export class Store {
       { kind: 'import', intent: `提取《${input.title}》的世界、人物与事件`, focus: [] },
       actor,
     )
-    const operations: Operation[] = documents.flatMap((doc, index) => {
+    const operations: Operation[] = []
+    documents.forEach((doc, index) => {
+      if (input.materialKind !== 'manuscript') {
+        operations.push({ type: 'document.put', value: doc })
+        return
+      }
       const entity = EntitySchema.parse({
         id: uid(),
         kind: 'chapter',
         name: doc.title,
         narrativeOrder: index,
       })
-      return [
+      operations.push(
         { type: 'entity.put', value: entity },
         { type: 'document.put', value: { ...doc, entityId: entity.id } },
-      ]
+      )
     })
     const change = this.propose(
       db,
       {
-        baseRevision: this.project(db).revision,
-        summary: `导入 ${documents.length} 个章节：${input.title}`,
+        baseRevision: this.novel(db).revision,
+        summary:
+          input.materialKind === 'manuscript'
+            ? `接纳 ${documents.length} 个正文片段：${input.title}`
+            : `接纳原始创作材料：${input.title}`,
         operations: safeJson(operations),
       },
       actor,
@@ -736,7 +745,9 @@ export class Store {
     return {
       change,
       task,
-      chapters: documents.length,
+      chapters: input.materialKind === 'manuscript' ? documents.length : 0,
+      materials: documents.length,
+      materialKind: input.materialKind,
       note: '原文先经作者接受；世界事实需要独立提取与审阅。',
     }
   }
@@ -841,8 +852,9 @@ export class Store {
       )
     if (world.entities.some((e) => e.stale)) gaps.push('存在来源失效的记录，已从上下文排除。')
     const pack: ContextPack = {
-      projectId: world.project.id,
-      revision: world.project.revision,
+      novelId: world.novel.id,
+      revision: world.novel.revision,
+      seed: world.novel.seed,
       perspective: input.perspective,
       focus: input.focus,
       time: input.time,
@@ -851,6 +863,14 @@ export class Store {
       relations: [],
       excerpts: [],
       gaps,
+      pending: {
+        changes: world.changes
+          .filter((change) => change.status === 'pending')
+          .map((change) => change.summary),
+        tasks: world.tasks
+          .filter((task) => !['completed', 'cancelled'].includes(task.status))
+          .map((task) => `${task.kind}:${task.stage}:${task.intent}`),
+      },
       truncated: false,
     }
     // Reserve envelope and truncation diagnostics, and count every serialized payload component.
@@ -964,13 +984,13 @@ export class Store {
     try {
       const data = {
         format: 'mythor',
-        version: 1,
-        project: this.project(db),
+        version: 2,
+        novel: this.novel(db),
         tables: Object.fromEntries(TABLES.map((t) => [t, this.all(db, t)])),
       }
       const json = stringify(data)
       return {
-        name: `${this.project(db).name}.mythor.json`,
+        name: `${this.novel(db).title}.mythor.json`,
         text: json,
         sha256: createHash('sha256').update(json).digest('hex'),
       }
@@ -980,29 +1000,55 @@ export class Store {
   }
   private restore(p: Record<string, Json>): Json {
     const input = z.object({ text: z.string().max(100_000_000) }).parse(p)
-    const data = z
+    const raw = z
       .object({
         format: z.literal('mythor'),
-        version: z.literal(1),
-        project: z.object({
-          name: z.string().min(1).max(200),
-          revision: z.number().int().nonnegative(),
-          createdAt: z.string(),
-        }),
-        tables: z
-          .object({
-            entities: z.array(EntitySchema),
-            relations: z.array(RelationSchema),
-            documents: z.array(DocumentSchema),
-            revisions: z.array(DocumentSchema),
-            changes: z.array(ChangeSetSchema),
-            commits: z.array(CommitSchema),
-            tasks: z.array(WorkflowSchema),
-            grants: z.array(z.json()),
-          })
-          .strict(),
+        version: z.union([z.literal(1), z.literal(2)]),
+        project: z.record(z.string(), z.json()).optional(),
+        novel: z.record(z.string(), z.json()).optional(),
+        tables: z.record(z.string(), z.array(z.record(z.string(), z.json()))),
       })
       .parse(JSON.parse(input.text))
+    const sourceNovel = raw.version === 1 ? raw.project : raw.novel
+    if (!sourceNovel) throw new MythorError('invalid-backup', '备份缺少小说信息')
+    const existing = this.novel(this.db())
+    if (existing.revision !== 0 || TABLES.some((table) => this.all(this.db(), table).length > 0))
+      throw new MythorError('restore-target-not-empty', '当前 Harness 项目已有小说内容，不能覆盖')
+    const novel: NovelState = {
+      id: typeof sourceNovel.id === 'string' ? sourceNovel.id : existing.id,
+      title: String(sourceNovel.title ?? sourceNovel.name ?? existing.title),
+      revision: Number(sourceNovel.revision ?? 0),
+      status:
+        sourceNovel.status === 'paused' || sourceNovel.archived === true ? 'paused' : 'active',
+      createdAt: String(sourceNovel.createdAt ?? existing.createdAt),
+      seed: {
+        worldRule: '',
+        protagonist: '',
+        desire: '',
+        obstacle: '',
+        stakes: '',
+        centralQuestion: '',
+        notes: '',
+        ...(typeof sourceNovel.seed === 'object' && sourceNovel.seed ? sourceNovel.seed : {}),
+      },
+    }
+    const convertOwner = (record: Record<string, Json>) => {
+      const { projectId: _projectId, novelId: _novelId, ...value } = record
+      return { ...value, novelId: novel.id }
+    }
+    const data = {
+      novel,
+      tables: {
+        entities: z.array(EntitySchema).parse(raw.tables.entities ?? []),
+        relations: z.array(RelationSchema).parse(raw.tables.relations ?? []),
+        documents: z.array(DocumentSchema).parse(raw.tables.documents ?? []),
+        revisions: z.array(DocumentSchema).parse(raw.tables.revisions ?? []),
+        changes: z.array(ChangeSetSchema).parse((raw.tables.changes ?? []).map(convertOwner)),
+        commits: z.array(CommitSchema).parse(raw.tables.commits ?? []),
+        tasks: z.array(WorkflowSchema).parse((raw.tables.tasks ?? []).map(convertOwner)),
+        grants: z.array(z.json()).parse(raw.tables.grants ?? []),
+      },
+    }
     for (const table of TABLES.filter((t) => t !== 'grants')) {
       const records = data.tables[table]
       const keys = records.map((r) => (table === 'revisions' ? (r as Document).revisionId : r.id))
@@ -1013,22 +1059,14 @@ export class Store {
     const findings = validate({ entities, documents, relations }, data.tables.revisions)
     if (findings.some((f) => f.severity === 'error'))
       throw new MythorError('invalid-backup', '备份包含无效引用', safeJson(findings))
-    const project: Project = {
-      ...data.project,
-      id: uid(),
-      name: `${data.project.name}（恢复）`,
-      archived: false,
-    }
-    this.catalog.prepare('INSERT INTO projects VALUES(?,?)').run(project.id, stringify(project))
-    const db = this.db(project.id)
+    const db = this.db()
     db.exec('BEGIN IMMEDIATE')
     try {
-      this.setProject(db, project)
+      this.setNovel(db, novel)
       for (const table of TABLES.filter((t) => t !== 'grants'))
         for (const record of data.tables[table]) {
           const value = {
             ...record,
-            ...(Object.hasOwn(record, 'projectId') ? { projectId: project.id } : {}),
             ...(table === 'tasks'
               ? {
                   sessionId: undefined,
@@ -1049,10 +1087,9 @@ export class Store {
       db.exec('COMMIT')
     } catch (error) {
       db.exec('ROLLBACK')
-      this.catalog.prepare('DELETE FROM projects WHERE id=?').run(project.id)
       throw error
     }
-    return safeJson(project)
+    return safeJson(novel)
   }
 }
 

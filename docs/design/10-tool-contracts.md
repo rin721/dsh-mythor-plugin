@@ -4,12 +4,11 @@
 
 ## 调用结构
 
-Remote 接收 `{action,projectId?,payload}`。模型工具通常固定 action，只接受 `{projectId,payload}`；`mythor_task` 另外接受 task.start / task.advance / task.resume / task.cancel。身份来自 Harness 调用上下文，不能作为参数提交。Client 还需先解包 Harness 的 RemoteResult 传输外层。
+Remote 接收 `{action,payload}`，通过 Typert Agent scope 自动携带当前 Session 身份。模型工具固定 action，只接受 `{payload}`；`mythor_task` 另外接受 task.start / task.advance / task.resume / task.cancel。novelId、projectId、Session ID 与数据库路径都不能作为业务参数提交。Client 从当前 Session scope 调用 Remote，并先解包 Harness RemoteResult 传输外层。
 
 | 工具 | payload 主要字段 | 结果 |
 | --- | --- | --- |
 | mythor_projects | 无 | 项目目录 |
-| mythor_binding | 无 | 当前会话的 projectId/focus |
 | mythor_query | text、kind、limit、offset | items、total、nextOffset |
 | mythor_context | focus[]、perspective、time、narrativeOrder、text | 带版本、来源、缺口和截断的 ContextPack |
 | mythor_graph | focus、depth、kinds[]、time、limit | nodes、edges、visits、lanes、intersections |
@@ -22,11 +21,11 @@ Remote 接收 `{action,projectId?,payload}`。模型工具通常固定 action，
 | mythor_commit | id、idempotencyKey | Commit；必须已有有效作者授权 |
 | mythor_history | 无 | 最新在前的提交历史 |
 
-仅作者入口：项目创建/归档、会话绑定、任务授权、接受规划/检查产物、拒绝候选、撤销、备份恢复。运行失败由 Host 的 agent/error 事件记录为 task.fail。工具没有 task.fail、grant 或 restore 的入口。
+仅作者入口：当前工作区启用/暂停、旧版迁移、任务授权、接受规划/检查产物、拒绝候选、撤销、备份恢复。运行失败由 Host 的 agent/error 事件记录为 task.fail。工具没有 task.fail、grant、enable、legacy.migrate 或 restore 的入口。
 
 ## 最小创作事务
 
-1. 作者创建项目并以 `/mythor project use <id>` 绑定会话。
+1. 作者使用 Harness 创建或选择工作区，并以 `/mythor enable <作品标题>` 启用一次。
 2. `/mythor write <意图>` 建立任务；Agent 查询上下文，逐一保存 read/goals/plan/simulate/write 产物。
 3. extract 阶段构造一个 ChangeSet，包括正文新修订、事件结果、对象和关系变化。新正文和对象可以在同一批相互引用。
 4. 保存 extract 产物后进入 validate。Critic 记录证据与未知事项，确定性服务检查引用、时间、因果、来源和规则。
@@ -53,7 +52,7 @@ revision-conflict / document-conflict：保留候选，重新读取并基于当�
 
 validation-failed：查看 details 中的 findings；修复 error 后重试。review-required：warning/unknown 需要作者判断，模型不能自动确认。
 
-project-scope / task-scope：检查会话绑定和任务归属，模型不能擅自重新绑定。grant-required：请作者在工作台限定对象授权或直接接受候选。
+novel-not-enabled / workspace-scope：使用 Harness 工作区选择器并由作者启用；浏览器和模型不能改变归属。task-scope：检查当前会话与任务归属。grant-required：请作者在工作台限定对象授权或直接接受候选。
 
 agent-unavailable：任务已保存，修复宿主模型配置后恢复。storage-busy / storage-failed / storage-unavailable：显示失败并保留输入；不要将失败响应解释为事务成功。恢复后通过幂等键确认写入结果。
 

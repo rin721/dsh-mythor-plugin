@@ -11,6 +11,6 @@
 7. **模型不持有提交身份**：author/agent 身份由入口决定；模型参数无法创建 grant 或声称作者接受。
 8. **Host/Client 契约**：遵循公开 Typert/Remote 机制，若发布工具链存在树外限制，先以契约测试确认并记录适配，不修改 Harness 源码来迁就 Plugin。
 
-实施补充：共享 Zod schema 构造一份 Typert descriptor，Host/Client 使用同一份。真实 Gateway 验证 wire schema，真实浏览器验证服务依赖注入与 RemoteResult 解包。项目目录和会话到小说的绑定同属插件业务数据，保存在 catalog.sqlite；不复制 Harness 会话日志。首版采用手动 UI 刷新，不自建事件总线。FTS5 使用汉字二元切分与词项检索，不声称具有语义相似度能力。
+0.1.x 的 catalog 与显式会话绑定已被 ADR 0003 取代。共享 Zod schema 构造 Typert descriptor，Host/Client 使用同一份；FTS5 使用汉字二元切分与词项检索，不声称具有语义相似度能力。
 
 依据：本地 Harness docs/architecture.zh.md、docs/api-gateway.zh.md、storage-domain/src/domain.ts、workflow/README.zh.md 及源码内 cordis-plugin-development 指引；初始基线 21638c5631 / 0.1.7-rc.2。

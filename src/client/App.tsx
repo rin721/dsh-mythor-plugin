@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useState } from 'react'
 import {
   EntitySchema,
   KINDS,
@@ -8,8 +8,9 @@ import {
   type Entity,
   type Finding,
   type Json,
+  type NovelState,
   type Operation,
-  type Project,
+  type StorySeed,
   type Relation,
   type Request,
   type Snapshot,
@@ -45,6 +46,14 @@ import {
 } from './ui/index.tsx'
 import { zh, type Key, type Translate } from './locales.ts'
 export type Api = (request: Request) => Promise<ApiResult>
+class ApiFailure extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+  ) {
+    super(message)
+  }
+}
 const uid = () => crypto.randomUUID()
 const json = (v: unknown): Json => JSON.parse(JSON.stringify(v)) as Json
 const tabs: Key[] = [
@@ -136,27 +145,27 @@ const fields: Partial<Record<Entity['kind'], [string, Key][]>> = {
     ['relationKind', 'field_rule_relationKind'],
   ],
 }
-export function App({ api, t = (k: Key) => zh[k] }: { api: Api; t?: Translate }) {
+export function App({
+  api,
+  t = (k: Key) => zh[k],
+  startConversation,
+  subscribe,
+}: {
+  api: Api
+  t?: Translate
+  startConversation?: (text: string) => void
+  subscribe?: (listener: () => void) => () => void
+}) {
   useLayoutEffect(mountStyles, [])
-  const [projects, setProjects] = useState<Project[]>([])
-  const [projectId, setProjectId] = useState('')
-  const currentProject = useRef(projectId)
-  currentProject.current = projectId
+  const [enabled, setEnabled] = useState(false)
+  const [workspaceAvailable, setWorkspaceAvailable] = useState(true)
   const [snapshot, setSnapshot] = useState<Snapshot>()
   const [tab, setTab] = useState<Key>('overview')
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState('')
   const [error, setError] = useState(false)
   const [modal, setModal] = useState<
-    | 'project'
-    | 'entity'
-    | 'import'
-    | 'relation'
-    | 'task'
-    | 'grant'
-    | 'binding'
-    | 'source'
-    | undefined
+    'enable' | 'legacy' | 'entity' | 'import' | 'relation' | 'task' | 'grant' | 'source' | undefined
   >()
   const [selected, setSelected] = useState('')
   const [evidence, setEvidence] = useState<{
@@ -199,34 +208,48 @@ export function App({ api, t = (k: Key) => zh[k] }: { api: Api; t?: Translate })
   const [routeTo, setRouteTo] = useState('')
   const [route, setRoute] = useState<string[]>()
   const [grantTask, setGrantTask] = useState('')
+  const [legacyNovels, setLegacyNovels] = useState<
+    { id: string; name: string; revision: number; archived: boolean }[]
+  >([])
   async function call<T>(
     action: Request['action'],
     payload: Record<string, Json> = {},
-    id = projectId,
   ): Promise<T> {
-    const result = await api({
-      action,
-      ...(id ? { projectId: id } : {}),
-      payload,
-    })
+    const result = await api({ action, payload })
     if (!result.ok)
-      throw new Error(
+      throw new ApiFailure(
+        result.error.code,
         `${result.error.code}: ${result.error.message}${result.error.details ? '\n' + JSON.stringify(result.error.details, null, 2) : ''}`,
       )
     return result.value as T
   }
-  async function refresh(id = projectId) {
-    setProjects(await call<Project[]>('project.list', {}, ''))
-    if (id) {
-      const [nextSnapshot, nextHistory] = await Promise.all([
-        call<Snapshot>('snapshot', {}, id),
-        call<Commit[]>('history', {}, id),
-      ])
-      if (currentProject.current === id) {
-        setSnapshot(nextSnapshot)
-        setHistory(nextHistory)
+  async function refresh() {
+    let status: { enabled: boolean }
+    try {
+      status = await call<{ enabled: boolean }>('novel.status')
+    } catch (failure) {
+      if (failure instanceof ApiFailure && failure.code === 'workspace-unavailable') {
+        setWorkspaceAvailable(false)
+        setEnabled(false)
+        setSnapshot(undefined)
+        setHistory([])
+        return
       }
+      throw failure
     }
+    setWorkspaceAvailable(true)
+    setEnabled(status.enabled)
+    if (!status.enabled) {
+      setSnapshot(undefined)
+      setHistory([])
+      return
+    }
+    const [nextSnapshot, nextHistory] = await Promise.all([
+      call<Snapshot>('snapshot'),
+      call<Commit[]>('history'),
+    ])
+    setSnapshot(nextSnapshot)
+    setHistory(nextHistory)
   }
   async function act(work: () => Promise<void>, success = true) {
     setBusy(true)
@@ -242,34 +265,21 @@ export function App({ api, t = (k: Key) => zh[k] }: { api: Api; t?: Translate })
       setBusy(false)
     }
   }
+  function closeModal() {
+    setModal(undefined)
+    setNotice('')
+    setError(false)
+  }
   useEffect(() => {
     void act(() => refresh(), false)
   }, [])
+  useEffect(() => subscribe?.(() => void act(() => refresh(), false)), [subscribe])
   useEffect(() => {
-    if (projectId) {
-      setSnapshot(undefined)
-      setSelected('')
-      setDocumentId('')
-      setDocTitle('')
-      setDocText('')
-      setDocEntity('')
-      setGraphFocus('')
-      setGraphTime('')
-      setRouteTo('')
-      setRoute(undefined)
-      setHistory([])
-      setModal(undefined)
-      setCheckDetails({})
-      setFindings([])
-      void act(() => refresh(projectId), false)
-    }
-  }, [projectId])
-  useEffect(() => {
-    if (projectId && tab === 'graph') void loadGraph()
-  }, [projectId, tab, graphMode, graphFocus, graphDepth, graphTime, snapshot?.project.revision])
+    if (enabled && tab === 'graph') void loadGraph()
+  }, [enabled, tab, graphMode, graphFocus, graphDepth, graphTime, snapshot?.novel.revision])
   async function propose(operations: Operation[], summary: string) {
     await call('changes.propose', {
-      baseRevision: snapshot!.project.revision,
+      baseRevision: snapshot!.novel.revision,
       summary,
       operations: json(operations),
     })
@@ -387,25 +397,13 @@ export function App({ api, t = (k: Key) => zh[k] }: { api: Api; t?: Translate })
           <div>
             <h1 className={cx('heading1')}>
               {t('title')}{' '}
-              <span className={cx('muted small')}>/ {snapshot?.project.name ?? t('projects')}</span>
+              <span className={cx('muted small')}>
+                / {snapshot?.novel.title ?? '当前 Harness 项目'}
+              </span>
             </h1>
             <span className={cx('muted')}>{t('subtitle')}</span>
           </div>
           <div className={cx('row')}>
-            <Select
-              aria-label={t('projects')}
-              value={projectId}
-              onValueChange={(e) => setProjectId(e)}
-            >
-              <SelectOption value="">{t('projects')}</SelectOption>
-              {projects.map((p) => (
-                <SelectOption key={p.id} value={p.id}>
-                  {p.name}
-                  {p.archived ? ` · ${t('archived')}` : ''}
-                </SelectOption>
-              ))}
-            </Select>
-            <Button onClick={() => setModal('project')}>{t('createProject')}</Button>
             <Button disabled={busy} onClick={() => void act(() => refresh(), false)}>
               {t('refresh')}
             </Button>
@@ -419,49 +417,60 @@ export function App({ api, t = (k: Key) => zh[k] }: { api: Api; t?: Translate })
             closeLabel={t('close')}
           />
         )}
-        {!projectId ? (
-          <main className={cx('main')}>
+        {!workspaceAvailable ? (
+          <main className={cx('main onboarding')}>
+            <EmptyState>
+              请先在 Harness 中选择或创建一个工作区。Mythor 不会在工作区之外创建小说数据。
+            </EmptyState>
+          </main>
+        ) : !enabled ? (
+          <main className={cx('main onboarding')}>
             <div className={cx('hero')}>
               <h2 className={cx('heading2')}>{t('help')}</h2>
               <p>{t('helpText')}</p>
               <div className={cx('row')}>
-                <Button onClick={() => setModal('project')} variant="primary">
-                  {t('createProject')}
+                <Button onClick={() => setModal('enable')} variant="primary">
+                  启用 Mythor
                 </Button>
-                <Field>
-                  {t('restore')}{' '}
-                  <FilePicker
-                    disabled={busy}
-                    accept=".json"
-                    onFileSelect={(e) => {
-                      const file = e
-                      if (file)
-                        void act(async () => {
-                          const project = await call<Project>(
-                            'restore',
-                            { text: await file.text() },
-                            '',
-                          )
-                          await refresh('')
-                          setProjectId(project.id)
-                        })
-                    }}
-                    label={t('chooseFile')}
-                  />
-                </Field>
+                {startConversation && (
+                  <Button
+                    onClick={() =>
+                      startConversation(
+                        '我想写一部小说，请根据我的想法逐步提问，并把有效信息整理成 Mythor StorySeed 候选。每轮只问少量关键问题。',
+                      )
+                    }
+                  >
+                    从一个想法开始
+                  </Button>
+                )}
+                <Button
+                  onClick={() =>
+                    void act(async () => {
+                      setLegacyNovels(await call('legacy.list'))
+                      setModal('legacy')
+                    }, false)
+                  }
+                >
+                  迁入旧版 Mythor 小说
+                </Button>
+                <FilePicker
+                  disabled={busy}
+                  accept=".json"
+                  onFileSelect={(e) => {
+                    const file = e
+                    if (file)
+                      void act(async () => {
+                        await call('restore', { text: await file.text() })
+                        await refresh()
+                      })
+                  }}
+                  label={t('restore')}
+                />
               </div>
             </div>
-            <div className={cx('cards')}>
-              {projects.map((p) => (
-                <Panel key={p.id}>
-                  <h3 className={cx('heading3')}>{p.name}</h3>
-                  <p className={cx('muted')}>
-                    {t('revision')} {p.revision}
-                  </p>
-                  <Button onClick={() => setProjectId(p.id)}>{t('open')} →</Button>
-                </Panel>
-              ))}
-            </div>
+            <p className={cx('muted')}>
+              一部小说对应一个 Harness 项目；项目名称、目录与会话由 Harness 管理。
+            </p>
           </main>
         ) : (
           <div className={cx('layout')}>
@@ -490,16 +499,15 @@ export function App({ api, t = (k: Key) => zh[k] }: { api: Api; t?: Translate })
                     <>
                       <div className={cx('hero')}>
                         <Tag>
-                          {t('revision')} {snapshot.project.revision}
+                          {t('revision')} {snapshot.novel.revision}
                         </Tag>
-                        <h2 className={cx('heading2')}>{snapshot.project.name}</h2>
+                        <h2 className={cx('heading2')}>{snapshot.novel.title}</h2>
                         <p>{t('helpText')}</p>
                         <div className={cx('row')}>
                           <Button onClick={() => setModal('task')} variant="primary">
                             {t('newTask')}
                           </Button>
                           <Button onClick={() => setModal('import')}>{t('import')}</Button>
-                          <Button onClick={() => setModal('binding')}>{t('binding')}</Button>
                         </div>
                       </div>
                       <div className={cx('cards')}>
@@ -534,17 +542,17 @@ export function App({ api, t = (k: Key) => zh[k] }: { api: Api; t?: Translate })
                         <Button
                           onClick={() =>
                             void act(async () => {
-                              await call('project.archive', {
-                                archived: !snapshot.project.archived,
+                              await call('novel.update', {
+                                status: snapshot.novel.status === 'active' ? 'paused' : 'active',
                               })
                               await refresh()
                             })
                           }
                         >
-                          {t(snapshot.project.archived ? 'unarchive' : 'archive')}
+                          {snapshot.novel.status === 'active' ? '暂停创作' : '继续创作'}
                         </Button>
                       </div>
-                      <p className={cx('muted small')}>ID {projectId}</p>
+                      <p className={cx('muted small')}>Novel ID {snapshot.novel.id}</p>
                     </>
                   )}
                   {(tab === 'world' || tab === 'structure') && (
@@ -654,7 +662,7 @@ export function App({ api, t = (k: Key) => zh[k] }: { api: Api; t?: Translate })
                         </Field>
                       </div>
                       <TextEditor
-                        key={`${projectId}:${documentId}`}
+                        key={`${snapshot.novel.id}:${documentId}`}
                         value={docText}
                         onChange={setDocText}
                       />
@@ -932,17 +940,23 @@ export function App({ api, t = (k: Key) => zh[k] }: { api: Api; t?: Translate })
                               </p>
                               <Disclosure title={t('compare')}>
                                 {c.operations.map((op, index) => {
-                                  const previous = op.type.startsWith('entity.')
-                                    ? snapshot.entities.find(
-                                        (e) => e.id === ('value' in op ? op.value.id : op.id),
-                                      )
-                                    : op.type.startsWith('relation.')
-                                      ? snapshot.relations.find(
-                                          (e) => e.id === ('value' in op ? op.value.id : op.id),
-                                        )
-                                      : snapshot.documents.find(
-                                          (e) => e.id === ('value' in op ? op.value.id : op.id),
-                                        )
+                                  const previous =
+                                    op.type === 'seed.put'
+                                      ? snapshot.novel.seed
+                                      : op.type.startsWith('entity.')
+                                        ? snapshot.entities.find(
+                                            (e) => e.id === ('value' in op ? op.value.id : op.id),
+                                          )
+                                        : op.type.startsWith('relation.')
+                                          ? snapshot.relations.find(
+                                              (e) => e.id === ('value' in op ? op.value.id : op.id),
+                                            )
+                                          : op.type.startsWith('document.')
+                                            ? snapshot.documents.find(
+                                                (e) =>
+                                                  e.id === ('value' in op ? op.value.id : op.id),
+                                              )
+                                            : undefined
                                   return (
                                     <div key={index}>
                                       <b>{op.type}</b>
@@ -1187,22 +1201,54 @@ export function App({ api, t = (k: Key) => zh[k] }: { api: Api; t?: Translate })
             </main>
           </div>
         )}
-        {modal === 'project' && (
-          <SimpleForm
-            title={t('createProject')}
+        {modal === 'enable' && (
+          <EnableForm
             close={() => setModal(undefined)}
-            fields={[['name', t('projectName')]]}
             busy={busy}
-            submit={(values) =>
+            submit={(title, seed) =>
               act(async () => {
-                const p = await call<Project>('project.create', values, '')
+                const novel = await call<NovelState>('novel.enable', { title })
+                if (Object.values(seed).some((value) => value.trim()))
+                  await call('changes.propose', {
+                    baseRevision: novel.revision,
+                    summary: '建立故事种子',
+                    operations: json([{ type: 'seed.put', value: seed }]),
+                  })
                 setModal(undefined)
-                await refresh('')
-                setProjectId(p.id)
+                await refresh()
+                if (Object.values(seed).some((value) => value.trim())) setTab('review')
               })
             }
             t={t}
           />
+        )}
+        {modal === 'legacy' && (
+          <Modal title="迁入旧版 Mythor 小说" close={closeModal} closeLabel={t('close')}>
+            {legacyNovels.length === 0 ? (
+              <EmptyState>没有发现旧版 Mythor 小说。</EmptyState>
+            ) : (
+              <div className={cx('list')}>
+                {legacyNovels.map((legacy) => (
+                  <Panel key={legacy.id}>
+                    <strong>{legacy.name}</strong>
+                    <p className={cx('muted small')}>v{legacy.revision}</p>
+                    <Button
+                      disabled={busy}
+                      onClick={() =>
+                        void act(async () => {
+                          await call('legacy.migrate', { legacyId: legacy.id })
+                          setModal(undefined)
+                          await refresh()
+                        })
+                      }
+                    >
+                      迁入当前 Harness 项目
+                    </Button>
+                  </Panel>
+                ))}
+              </div>
+            )}
+          </Modal>
         )}
         {modal === 'source' && evidence && (
           <Modal
@@ -1307,21 +1353,6 @@ export function App({ api, t = (k: Key) => zh[k] }: { api: Api; t?: Translate })
             }
           />
         )}
-        {modal === 'binding' && (
-          <SimpleForm
-            title={t('binding')}
-            fields={[['sessionId', t('sessionId')]]}
-            t={t}
-            close={() => setModal(undefined)}
-            busy={busy}
-            submit={(values) =>
-              act(async () => {
-                await call('binding.set', values)
-                setModal(undefined)
-              })
-            }
-          />
-        )}
       </div>
     </FeedbackScope>
   )
@@ -1339,6 +1370,74 @@ function FindingList({ findings }: { findings: Finding[] }) {
         </Panel>
       ))}
     </div>
+  )
+}
+function EnableForm({
+  submit,
+  close,
+  busy,
+  t,
+}: {
+  submit: (title: string, seed: StorySeed) => Promise<void>
+  close: () => void
+  busy: boolean
+  t: Translate
+}) {
+  const [title, setTitle] = useState('')
+  const [details, setDetails] = useState(false)
+  const [seed, setSeed] = useState<StorySeed>({
+    worldRule: '',
+    protagonist: '',
+    desire: '',
+    obstacle: '',
+    stakes: '',
+    centralQuestion: '',
+    notes: '',
+  })
+  const fields: [keyof StorySeed, string][] = [
+    ['worldRule', '世界规则'],
+    ['protagonist', '主角'],
+    ['desire', '欲望'],
+    ['obstacle', '阻碍'],
+    ['stakes', '失败代价'],
+    ['centralQuestion', '核心未知'],
+    ['notes', '其他想法'],
+  ]
+  return (
+    <Modal title="在当前 Harness 项目启用 Mythor" close={close} closeLabel={t('close')}>
+      <Field>
+        作品标题
+        <Input
+          data-modal-autofocus
+          value={title}
+          onChange={(event) => setTitle(event.target.value)}
+        />
+      </Field>
+      <Checkbox checked={details} onChange={setDetails} label="我已经有明确想法" />
+      {details &&
+        fields.map(([key, label]) => (
+          <Field key={key}>
+            {label}
+            <TextArea
+              value={seed[key]}
+              onChange={(event) => setSeed({ ...seed, [key]: event.target.value })}
+            />
+          </Field>
+        ))}
+      <p className={cx('muted small')}>
+        种子字段都可以留空；已填写内容会先形成候选，经过审阅后才进入正式版本。
+      </p>
+      <FormActions>
+        <Button onClick={close}>{t('cancel')}</Button>
+        <Button
+          variant="primary"
+          disabled={busy || !title.trim()}
+          onClick={() => void submit(title.trim(), seed)}
+        >
+          启用
+        </Button>
+      </FormActions>
+    </Modal>
   )
 }
 function SimpleForm({
@@ -1565,6 +1664,7 @@ function ImportForm({
 }) {
   const [title, setTitle] = useState('')
   const [text, setText] = useState('')
+  const [materialKind, setMaterialKind] = useState('manuscript')
   const [result, setResult] = useState<Json>()
   const [error, setError] = useState('')
   return (
@@ -1599,6 +1699,16 @@ function ImportForm({
           onChange={(e) => setText(e.target.value)}
         />
       </Field>
+      <Field>
+        材料类型
+        <Select value={materialKind} onValueChange={setMaterialKind}>
+          <SelectOption value="manuscript">正文或章节</SelectOption>
+          <SelectOption value="outline">大纲</SelectOption>
+          <SelectOption value="characters">人物设定</SelectOption>
+          <SelectOption value="world">世界观</SelectOption>
+          <SelectOption value="notes">笔记</SelectOption>
+        </Select>
+      </Field>
       {result && <JsonView data={result} label={t('details')} t={t} />}
       {error && <ErrorState>{error}</ErrorState>}
       <FormActions>
@@ -1606,7 +1716,7 @@ function ImportForm({
         <Button
           disabled={busy || !title || !text}
           onClick={() =>
-            void preview({ title, text })
+            void preview({ title, text, materialKind })
               .then(setResult)
               .catch((e) => setError(String(e)))
           }
@@ -1615,7 +1725,7 @@ function ImportForm({
         </Button>
         <Button
           disabled={busy || !title || !text}
-          onClick={() => void save({ title, text })}
+          onClick={() => void save({ title, text, materialKind })}
           variant="primary"
         >
           {t('import')}
@@ -1730,7 +1840,6 @@ function TaskForm({
 }) {
   const [kind, setKind] = useState('write')
   const [intent, setIntent] = useState('')
-  const [sessionId, setSessionId] = useState('')
   return (
     <Modal title={t('newTask')} close={close} closeLabel={t('close')}>
       <Field>
@@ -1747,16 +1856,12 @@ function TaskForm({
         {t('intent')}
         <TextArea value={intent} onChange={(e) => setIntent(e.target.value)} />
       </Field>
-      <Field>
-        {t('sessionId')}
-        <Input value={sessionId} onChange={(e) => setSessionId(e.target.value)} />
-      </Field>
       <p className={cx('muted small')}>{t('taskInstructions')}</p>
       <FormActions>
         <Button onClick={close}>{t('cancel')}</Button>
         <Button
           disabled={busy || !intent.trim()}
-          onClick={() => void save({ kind, intent, ...(sessionId ? { sessionId } : {}) })}
+          onClick={() => void save({ kind, intent })}
           variant="primary"
         >
           {t('newTask')}

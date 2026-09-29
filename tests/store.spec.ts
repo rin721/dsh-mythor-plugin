@@ -12,25 +12,24 @@ import {
   type Entity,
   type Json,
   type Operation,
-  type Project,
   type Request,
   type Snapshot,
   type WorkflowRun,
 } from '../src/shared/contracts.ts'
 import { validate } from '../src/domain/validation.ts'
 const author: Actor = { kind: 'author' }
-let store: Store, root: string, project: Project
+let store: Store, root: string
 const entity = (id: string, kind: Entity['kind'] = 'character', extra: Partial<Entity> = {}) =>
   EntitySchema.parse({ id, kind, name: id, ...extra })
 function call<T>(action: Request['action'], payload: Record<string, Json> = {}, actor = author): T {
-  return store.execute({ action, projectId: project.id, payload }, actor) as T
+  return store.execute({ action, payload }, actor) as T
 }
 function propose(operations: Operation[], taskId?: string) {
   return call<ChangeSet>(
     'changes.propose',
     JSON.parse(
       JSON.stringify({
-        baseRevision: call<Snapshot>('snapshot').project.revision,
+        baseRevision: call<Snapshot>('snapshot').novel.revision,
         summary: '测试候选',
         operations,
         taskId,
@@ -44,10 +43,7 @@ function commit(change: ChangeSet, actor = author, key: string = randomUUID()) {
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'mythor-test-'))
   store = new Store(root)
-  project = store.execute(
-    { action: 'project.create', payload: { name: '车站与地图' } },
-    author,
-  ) as unknown as Project
+  store.execute({ action: 'novel.enable', payload: { title: '车站与地图' } }, author)
 })
 afterEach(() => {
   store.close()
@@ -103,7 +99,7 @@ describe('formal story commits', () => {
     ])
     expect(() => commit(change)).toThrow('存在阻止提交')
     const world = call<Snapshot>('snapshot')
-    expect(world.project.revision).toBe(0)
+    expect(world.novel.revision).toBe(0)
     expect(world.entities).toHaveLength(0)
   })
   it('rejects stale baseline, and idempotent retries return the original commit', () => {
@@ -191,22 +187,14 @@ describe('formal story commits', () => {
     expect(call<Commit[]>('history')).toHaveLength(2)
     expect(() => call('history.undo', { id: first.id })).toThrow('后续提交')
   })
-  it('survives reopening and restores into a distinct project', () => {
+  it('survives reopening and restores only into an empty novel store', () => {
     commit(propose([{ type: 'entity.put', value: entity('lin') }]))
     const backup = call<{ text: string }>('backup')
     store.close()
     store = new Store(root)
     expect(call<Snapshot>('snapshot').entities).toHaveLength(1)
-    const restored = call<Project>('restore', { text: backup.text })
-    expect(restored.id).not.toBe(project.id)
-    expect(
-      (
-        store.execute(
-          { action: 'snapshot', projectId: restored.id, payload: {} },
-          author,
-        ) as unknown as Snapshot
-      ).entities[0].id,
-    ).toBe('lin')
+    expect(call<Snapshot>('snapshot').entities[0].id).toBe('lin')
+    expect(() => call('restore', { text: backup.text })).toThrow('已有小说内容')
   })
 })
 
@@ -343,16 +331,14 @@ describe('epistemic and temporal boundaries', () => {
 
 describe('workflow authority', () => {
   const agent: Actor = { kind: 'agent', sessionId: 'session1' }
-  it('requires author binding and rejects model-signed authority', () => {
-    expect(() => call('context', {}, agent)).toThrow('绑定')
-    call('binding.set', { sessionId: 'session1' })
+  it('rejects model-signed authority', () => {
+    expect(call('context', {}, agent)).toBeTruthy()
     expect(() => call('grant', { taskId: 'any', entityIds: ['lin'] }, agent)).toThrow('只能由作者')
     expect(() => commit(propose([{ type: 'entity.put', value: entity('lin') }]), agent)).toThrow(
       '需要已完成校验的任务',
     )
   })
   it('persists stage artifacts, rejects skips and requires bounded grants to commit', () => {
-    call('binding.set', { sessionId: 'session1' })
     const task = call<WorkflowRun>('task.start', { kind: 'write', intent: '车站交换地图' }, agent)
     expect(() =>
       call('task.advance', { id: task.id, stage: 'write', artifact: '草稿' }, agent),
@@ -392,7 +378,6 @@ describe('workflow authority', () => {
     expect(resumed.error).toBeUndefined()
   })
   it('keeps Critic uncertainty in review even under an author grant', () => {
-    call('binding.set', { sessionId: 'session1' })
     const task = call<WorkflowRun>('task.start', { kind: 'write', intent: '地图交易' }, agent)
     for (const stage of ['read', 'goals', 'plan', 'simulate', 'write', 'extract'])
       call('task.advance', { id: task.id, stage, artifact: { done: stage } }, agent)
@@ -434,9 +419,8 @@ describe('workflow authority', () => {
     expect(call<Snapshot>('snapshot').documents).toHaveLength(2)
     expect(call<Snapshot>('snapshot').entities.every((e) => e.kind === 'chapter')).toBe(true)
   })
-  it('binds an imported task on resume without allowing models to rebind it', () => {
+  it('resumes an imported task in the author-selected execution session', () => {
     const result = call<{ task: WorkflowRun }>('import', { title: '章', text: '林烬出发。' })
-    call('binding.set', { sessionId: 'session1' })
     const task = call<WorkflowRun>('task.resume', { id: result.task.id, sessionId: 'session1' })
     expect(task.sessionId).toBe('session1')
     expect(() => call('task.resume', { id: task.id, sessionId: 'other' }, agent)).toThrow(
@@ -470,17 +454,30 @@ describe('backup and source evidence', () => {
       ]),
     )
     const backup = call<{ text: string }>('backup')
-    const restored = call<Project>('restore', { text: backup.text })
-    const result = store.execute(
-      { action: 'document.read', projectId: restored.id, payload: { revisionId: 'v1' } },
+    const restoredStore = new Store(join(root, 'restored'))
+    restoredStore.execute({ action: 'novel.enable', payload: { title: '恢复目标' } }, author)
+    restoredStore.execute({ action: 'restore', payload: { text: backup.text } }, author)
+    const result = restoredStore.execute(
+      { action: 'document.read', payload: { revisionId: 'v1' } },
       author,
     ) as { text: string }
     expect(result.text).toBe('林烬出发。')
+    restoredStore.close()
     const malformed = JSON.parse(backup.text)
     malformed.tables.relations = [{ id: 'broken' }]
-    const count = call<Project[]>('project.list').length
-    expect(() => call('restore', { text: JSON.stringify(malformed) })).toThrow()
-    expect(call<Project[]>('project.list')).toHaveLength(count)
+    const malformedStore = new Store(join(root, 'malformed'))
+    malformedStore.execute({ action: 'novel.enable', payload: { title: '损坏目标' } }, author)
+    expect(() =>
+      malformedStore.execute(
+        { action: 'restore', payload: { text: JSON.stringify(malformed) } },
+        author,
+      ),
+    ).toThrow()
+    expect(
+      (malformedStore.execute({ action: 'snapshot', payload: {} }, author) as unknown as Snapshot)
+        .entities,
+    ).toHaveLength(0)
+    malformedStore.close()
   })
   it('exports in narrative order instead of document insertion order', () => {
     commit(

@@ -17,7 +17,7 @@ TypeScript strict、ESM、pnpm；Host 和 Client 独立构建。Node 范围跟�
 
 领域单元：时间、认知、规则、候选状态、逆操作、阶段推进。
 存储集成：真实 SQLite、重开持久化、原子提交、幂等、冲突、来源失效、迁移和备份恢复。
-Harness 契约：真实 Cordis tools/commands、公开 Remote、生命周期卸载、会话绑定、模型不得签发授权。
+Harness 契约：真实 Cordis tools/commands、Agent-scoped Remote、Workspace 作用域、conversation slots、生命周期卸载、模型不得签发授权。
 UI：真实浏览器中的表单、审阅、图谱和取消；深浅主题及无障碍基本语义。
 
 组件测试：`pnpm test:ui` 使用独立 jsdom 配置，覆盖空选择、未知数值、中文受控输入、文件重复选择、表单提交及官方 Modal 内 Select 的 Escape/回焦。`pnpm check:ui` 检查导入与 JSX 边界；`pnpm test` 包含领域测试、组件测试和边界检查。jsdom 不验证真实几何布局，不能代替宿主 smoke。
@@ -27,7 +27,7 @@ UI：真实浏览器中的表单、审阅、图谱和取消；深浅主题及无
 
 基准输入为 300 万汉字、3,000 场景、10,000 对象、50,000 关系。记录运行环境、索引耗时、检索耗时和内存；图谱默认局部展开。性能目标为常用局部查询 500ms 内、首屏 2s 内（本机、预热索引），首次索引单独报告。未经运行不得标记达标。
 
-诊断应关联 projectId/taskId/changeSetId 和错误码，默认不输出整段用户正文或凭据。当前通过操作错误和任务详情展示失败，数据库版本保存在存储元数据，Harness 基线记录在实施文档；汇总状态页及统一诊断日志是后续扩展。备份在一致快照上执行；恢复到新目标并验证后切换，不覆盖唯一原件。
+诊断应关联 workspaceId/novelId/taskId/changeSetId 和错误码，默认不输出整段用户正文或凭据。数据库版本保存在存储元数据，Harness 基线记录在实施文档。备份在一致快照上执行；恢复只进入尚无创作内容的目标，旧版迁移使用只读一致快照且不改变原库。
 
 ## 完成定义
 

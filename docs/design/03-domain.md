@@ -26,7 +26,7 @@
 
 ## 三种时间与信息边界
 
-WorldTime 包含可选的起止序号和显示标签。未知时间保持未知，序号仅在同一项目时间轴可比较；相对先后使用 before 边。NarrativePosition 使用章节/场景次序和正文位置。Revision 使用递增项目版本。
+WorldTime 包含可选的起止序号和显示标签。未知时间保持未知，序号仅在同一小说时间轴可比较；相对先后使用 before 边。NarrativePosition 使用章节/场景次序和正文位置。Revision 使用递增小说版本。
 
 作者视角允许查询全部已接受记录。人物视角只加载该人物已知断言及当时的认知；读者视角只加载叙述位置之前的揭露。Planner 可以使用作者视角规划后续；Writer 必须接收明确的可写信息边界，秘密可作为禁止提前揭露的约束单独提供。
 
@@ -36,6 +36,6 @@ DocumentRevision 保存正文、对象关联、revisionId 和 parentRevisionId�
 
 ## 领域聚合
 
-Project 管理配置、正式版本和归档状态。ChangeSet 包含对象/关系/正文操作及预期基线。Commit 保存原操作、逆操作、来源变更集和作者。WorkflowRun 保存类型、阶段、输入、产物、状态及绑定会话。Grant 由作者签发，限制任务和操作对象。
+Harness Workspace 管理目录、项目名称和会话归属，不复制成 Mythor 领域聚合。NovelState 管理内部小说身份、作品标题、正式版本、StorySeed 与 active/paused 创作状态。StorySeed 的世界规则、主角、欲望、阻碍、失败代价和核心未知均可缺省；`seed.put` 与其他正式操作一样进入 ChangeSet、校验、审阅、提交和补偿历史。ChangeSet 包含对象、关系、正文或种子操作及预期基线。Commit 保存原操作、逆操作、来源变更集和作者。WorkflowRun 保存类型、阶段、输入、产物、状态及执行会话。Grant 由作者签发，限制任务和操作对象。
 
 不把会话、模型凭据或 Harness Agent 状态复制成领域对象。Repository 提供事务和查询；实体详情、图谱、时间线与上下文都读取同一数据源。

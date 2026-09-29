@@ -1,6 +1,6 @@
 {
   "name": "dsh-mythor-plugin",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Mythor: persistent novel creation, knowledge and story relationships for DeepSeek Harness",
   "type": "module",
   "engines": {
@@ -36,8 +36,8 @@
       "immediately": true,
       "inject": [
         "@deepseek-ai/dsh-api-remotes",
-        "@deepseek-ai/dsh-client-ui-sidebar",
-        "@deepseek-ai/dsh-client-ui-layout"
+        "@deepseek-ai/dsh-api-session-controller",
+        "@deepseek-ai/dsh-client-ui-conversation"
       ]
     }
   },
@@ -83,6 +83,7 @@
     "@deepseek-ai/dsh-tools": "0.1.7-rc.2",
     "@deepseek-ai/dsh-typert-protocol": "0.1.7-rc.2",
     "@deepseek-ai/dsh-typert-registry": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-workspace": "0.1.7-rc.2",
     "@deepseek-ai/dsh-util-code-language": "0.1.7-rc.2",
     "@deepseek-ai/dsh-util-workspace-path": "0.1.7-rc.2",
     "@deepseek-ai/schemastery": "3.18.4",

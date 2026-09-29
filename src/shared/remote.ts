@@ -21,7 +21,22 @@ export const descriptor: InvocationDescriptor = {
   namespace: 'mythor',
   method: 'request',
   invocation: { kind: 'direct' },
+  scope: { context: 'agent', wire: 'agentId' },
   parameters: [
+    {
+      name: 'agent',
+      wire: 'agentId',
+      source: 'lookup',
+      lookup: 'agent',
+      codec: {
+        mode: 'strict',
+        // The Agent lookup is wired by Harness through the owning SessionId.
+        // This symbol must exactly match AgentRegistry's public lookup contract;
+        // the Gateway rejects plugin-local aliases before resolving the Agent.
+        typeSymbol: '@deepseek-ai/dsh-session/types#SessionId',
+        create: () => z.string(),
+      },
+    },
     {
       name: 'request',
       wire: 'request',
@@ -36,7 +51,23 @@ export const descriptor: InvocationDescriptor = {
   cancellation: { parameter: 'signal' },
   result: { mode: 'strict', typeSymbol: 'dsh-mythor-plugin#ApiResult', create: () => ResultSchema },
 }
+export const watchDescriptor: InvocationDescriptor = {
+  id: 'dsh-mythor-plugin#mythor/watch',
+  service: 'mythor',
+  namespace: 'mythor',
+  method: 'watch',
+  invocation: { kind: 'direct' },
+  mode: 'stream',
+  scope: { context: 'agent', wire: 'agentId' },
+  parameters: [descriptor.parameters[0]!],
+  cancellation: { parameter: 'signal' },
+  result: {
+    mode: 'strict',
+    typeSymbol: 'dsh-mythor-plugin#NovelInvalidation',
+    create: () => z.object({ generation: z.number().int().positive() }).strict(),
+  },
+}
 export const remoteContribution: TypertRemoteContribution = {
   package: 'dsh-mythor-plugin',
-  descriptors: [descriptor],
+  descriptors: [descriptor, watchDescriptor],
 }

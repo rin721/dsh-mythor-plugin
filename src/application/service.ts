@@ -9,7 +9,7 @@ export class MythorApplication {
   constructor(
     readonly root: string,
     limits?: Partial<Limits>,
-    workerUrl = new URL('./worker.js', import.meta.url),
+    workerUrl: URL = new URL('./worker.js', import.meta.url),
   ) {
     this.worker = new Worker(workerUrl, { workerData: { root, limits } })
     this.worker.on('message', ({ id, result }: { id: number; result: ApiResult }) => {

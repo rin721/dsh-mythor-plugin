@@ -1,6 +1,14 @@
-import type { Document, Entity, Finding, Operation, Relation } from '../shared/contracts.ts'
+import type {
+  Document,
+  Entity,
+  Finding,
+  Operation,
+  Relation,
+  StorySeed,
+} from '../shared/contracts.ts'
 
 export interface World {
+  seed?: StorySeed
   entities: Entity[]
   relations: Relation[]
   documents: Document[]
@@ -9,6 +17,7 @@ export function applyOperations(world: World, operations: Operation[]): World {
   const entities = new Map(world.entities.map((v) => [v.id, v]))
   const relations = new Map(world.relations.map((v) => [v.id, v]))
   const documents = new Map(world.documents.map((v) => [v.id, v]))
+  let seed = world.seed
   for (const op of operations) {
     switch (op.type) {
       case 'entity.put':
@@ -29,9 +38,13 @@ export function applyOperations(world: World, operations: Operation[]): World {
       case 'document.delete':
         documents.delete(op.id)
         break
+      case 'seed.put':
+        seed = op.value
+        break
     }
   }
   return {
+    seed,
     entities: [...entities.values()],
     relations: [...relations.values()],
     documents: [...documents.values()],

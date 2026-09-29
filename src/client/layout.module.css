@@ -60,6 +60,11 @@
   padding: 24px;
   min-width: 0;
 }
+.onboarding {
+  width: min(920px, 100%);
+  margin-inline: auto;
+  box-sizing: border-box;
+}
 .cards {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));

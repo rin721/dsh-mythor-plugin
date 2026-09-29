@@ -16,5 +16,7 @@
 | M12 | 持续创作 | import/export/revise | 全流程 | 既有长篇可导入、审阅、续写、导出 |
 | M13 | Harness 复用 | Plugin adapters | Tool/Command/Slot | 安装、卸载、会话恢复均有效 |
 | M14 | 作者操作创作对象 | 全工作台及八类弹窗 | Harness UI 适配层 | 官方组件优先，补充组件跟随主题；键盘、输入、审阅与业务操作一致 |
+| M15 | 长期创作空间 | Harness Workspace / NovelState | Agent scope / 原生 Mythor 视图 | 同工作区多会话共享、不同工作区隔离；未启用不创建数据 |
+| M16 | 从想法或材料开始 | StorySeed / SourceRef / import task | 对话引导、启用入口、迁入审阅 | 不完整种子可保存候选；材料与推断分开确认；旧数据只显式迁移 |
 
 覆盖状态及执行命令只记录在 implementation/status.md；本表描述必须成立的行为，不代表已验证。

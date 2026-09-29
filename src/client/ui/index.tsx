@@ -298,7 +298,7 @@ export function Feedback({
 }) {
   // Errors stay available until explicitly dismissed; transient success uses host toast.
   return error ? (
-    <div className={css.feedback} role="alert">
+    <div className={clsx(css.feedback, css.feedbackError)} role="alert">
       <StateDot state="error" />
       <span>{text}</span>
       <Button onClick={onClose}>{closeLabel}</Button>

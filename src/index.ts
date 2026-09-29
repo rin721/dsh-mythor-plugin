@@ -1,6 +1,5 @@
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { randomUUID } from 'node:crypto'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Context } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
@@ -8,11 +7,12 @@ import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import type {} from '@deepseek-ai/dsh-typert-registry'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-commands'
+import type {} from '@deepseek-ai/dsh-workspace'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { z } from 'zod'
-import { MythorApplication } from './application/service.ts'
-import { descriptor } from './shared/remote.ts'
+import { WorkspaceNovels } from './application/workspaces.ts'
+import { descriptor, watchDescriptor } from './shared/remote.ts'
 import {
   RequestSchema,
   WorkflowSchema,
@@ -23,8 +23,9 @@ import {
 import { ROLE_GUIDANCE } from './domain/workflows.ts'
 
 export const name = 'mythor'
-export const inject = ['tools', 'commands', 'systemPrompt', 'typert']
+export const inject = ['tools', 'commands', 'typert', 'workspaceRegistry']
 export interface Config {
+  /** Retained only as the read-only source for explicit legacy migration. */
   dataDirectory: string
   maxImportChars: number
   maxGraphNodes: number
@@ -38,6 +39,7 @@ export const Config: Schema<Config> = Schema.object({
   maxGraphNodes: Schema.natural().min(1).default(200),
   contextChars: Schema.natural().min(1000).default(24_000),
 })
+
 declare module '@deepseek-ai/cordis' {
   interface Context {
     mythor: MythorRemote
@@ -45,123 +47,66 @@ declare module '@deepseek-ai/cordis' {
 }
 
 export class MythorRemote extends TypertRemoteService {
-  agents?: Context['agents']
-  private active = new Map<string, WorkflowRun>()
-  track(task: WorkflowRun) {
-    if (task.sessionId) this.active.set(task.sessionId, task)
-  }
-  dispatch(agent: Agent, task: WorkflowRun) {
-    const current = this.active.get(agent.id)
-    if (agent.status === 'running' && current?.id === task.id) return
-    if (agent.status === 'running' && current?.id !== task.id)
-      throw new Error('会话正在处理其他工作，请等待结束或使用新会话')
-    this.active.set(agent.id, task)
-    agent.followup(taskMessage(task))
-  }
-  async failed(sessionId: string, error: unknown) {
-    const task = this.active.get(sessionId)
-    if (!task) return
-    this.active.delete(sessionId)
-    await this.application.request({
-      action: 'task.fail',
-      projectId: task.projectId,
-      payload: {
-        id: task.id,
-        error: (error instanceof Error ? error.message : String(error)).slice(0, 2000),
-      },
-    })
-  }
-  cancel(task: WorkflowRun) {
-    if (task.sessionId && this.active.get(task.sessionId)?.id === task.id) {
-      this.agents?.get(task.sessionId as Agent['id'])?.cancel({ kind: 'user' })
-      this.active.delete(task.sessionId)
-    }
-  }
+  private readonly active = new Map<string, WorkflowRun>()
+  onEnabled?: (agent: Agent) => Promise<void>
   constructor(
     ctx: Context,
-    private readonly application: MythorApplication,
+    private readonly novels: WorkspaceNovels,
   ) {
     super(ctx, 'mythor')
   }
+
+  dispatch(agent: Agent, task: WorkflowRun) {
+    const current = this.active.get(String(agent.id))
+    if (agent.status === 'running' && current?.id !== task.id)
+      throw new Error('当前会话正在处理其他工作，请等待或使用同一 Harness 项目的新会话')
+    this.active.set(String(agent.id), task)
+    agent.followup(taskMessage(task))
+  }
+  async failed(agent: Agent, error: unknown) {
+    const task = this.active.get(String(agent.id))
+    if (!task) return
+    this.active.delete(String(agent.id))
+    await this.novels.request(
+      agent,
+      { action: 'task.fail', payload: { id: task.id, error: String(error).slice(0, 2000) } },
+      { kind: 'author' },
+    )
+  }
+  cancel(agent: Agent, task: WorkflowRun) {
+    if (this.active.get(String(agent.id))?.id === task.id) {
+      agent.cancel({ kind: 'user' })
+      this.active.delete(String(agent.id))
+    }
+  }
   @Remote
-  async request(request: Request, signal: AbortSignal): Promise<ApiResult> {
+  async request(agent: Agent, request: Request, signal: AbortSignal): Promise<ApiResult> {
     const parsed = RequestSchema.parse(request)
-    let result = await this.application.request(parsed, { kind: 'author' }, signal)
-    if (result.ok && parsed.action === 'task.cancel')
-      this.cancel(WorkflowSchema.parse(result.value))
-    if (result.ok && (parsed.action === 'task.start' || parsed.action === 'task.resume')) {
-      let task = WorkflowSchema.parse(result.value)
+    const result = await this.novels.request(agent, parsed, { kind: 'author' }, signal)
+    if (!result.ok) return result
+    if (['novel.enable', 'restore', 'legacy.migrate'].includes(parsed.action))
+      await this.onEnabled?.(agent)
+    if (parsed.action === 'task.cancel') this.cancel(agent, WorkflowSchema.parse(result.value))
+    if (parsed.action === 'task.start' || parsed.action === 'task.resume') {
+      const task = WorkflowSchema.parse(result.value)
       try {
-        const agents = this.agents
-        if (!agents) throw new Error('宿主未提供 Agents 服务')
-        if (!task.sessionId) {
-          const sessionId = randomUUID() as Agent['id']
-          const handle = await agents.create({
-            sessionId,
-            meta: { cwd: this.application.root },
-            signal,
-          })
-          this.ctx.effect(() => () => handle.dispose())
-          const bound = await this.application.request({
-            action: 'binding.set',
-            projectId: task.projectId,
-            payload: { sessionId },
-          })
-          if (!bound.ok) return bound
-          result = await this.application.request({
-            action: 'task.resume',
-            projectId: task.projectId,
-            payload: { id: task.id, sessionId },
-          })
-          if (!result.ok) return result
-          task = WorkflowSchema.parse(result.value)
-        }
-        const binding = await this.application.request({
-          action: 'binding.get',
-          payload: { sessionId: task.sessionId! },
-        })
-        if (
-          !binding.ok ||
-          !binding.value ||
-          (binding.value as { projectId?: string }).projectId !== task.projectId
-        )
-          return {
-            ok: false,
-            error: {
-              code: 'project-scope',
-              message: '任务已保存，但会话绑定不同项目；请绑定后恢复任务',
-            },
-          }
-        let agent = agents.get(task.sessionId as Agent['id'])
-        if (!agent) {
-          const handle = await agents.resume({
-            resumeSessionId: task.sessionId as Agent['id'],
-            signal,
-          })
-          this.ctx.effect(() => () => handle.dispose())
-          agent = handle.agent
-        }
         this.dispatch(agent, task)
       } catch (error) {
-        await this.application.request({
-          action: 'task.fail',
-          projectId: task.projectId,
-          payload: {
-            id: task.id,
-            error: (error instanceof Error ? error.message : String(error)).slice(0, 2000),
-          },
-        })
         return {
           ok: false,
           error: {
-            code: 'agent-unavailable',
-            message: `任务已保存，可在宿主 Agent 可用后恢复：${error instanceof Error ? error.message : String(error)}`,
+            code: 'agent-busy',
+            message: error instanceof Error ? error.message : String(error),
             details: { taskId: task.id },
           },
         }
       }
     }
     return result
+  }
+  @Remote({ mode: 'stream' })
+  watch(agent: Agent, signal: AbortSignal): AsyncIterable<{ generation: number }> {
+    return this.novels.watch(agent, signal)
   }
 }
 
@@ -171,318 +116,251 @@ function taskMessage(task: WorkflowRun) {
     content: [
       {
         type: 'text',
-        text: `执行 Mythor 任务 ${task.id}，项目 ${task.projectId}，基线版本 ${task.baseRevision}。意图：${task.intent}\n当前阶段 ${task.stage}：${ROLE_GUIDANCE[task.stage]}\n已保存产物：${JSON.stringify(task.artifacts)}\n${GENERIC_HELP}`,
+        text: `执行 Mythor 任务 ${task.id}，小说 ${task.novelId}，基线版本 ${task.baseRevision}。意图：${task.intent}\n当前阶段 ${task.stage}：${ROLE_GUIDANCE[task.stage]}\n已保存产物：${JSON.stringify(task.artifacts)}\n${GENERIC_HELP}`,
       },
     ],
   })
 }
 
-const tools: {
-  name: string
-  action?: Request['action']
-  description: string
-}[] = [
-  {
-    name: 'mythor_critique',
-    action: 'task.critique',
-    description:
-      'Save Critic findings in validate/review stage: payload {id: taskId, findings:[{code,severity:"warning"|"unknown",message,entityIds,sources,suggestion?}]}. Advisory only, never a proof of literary quality or permission to commit.',
-  },
-  {
-    name: 'mythor_projects',
-    action: 'project.list',
-    description:
-      'List available novel projects. Ask the author to bind a project with /mythor project use <id> before operating.',
-  },
-  {
-    name: 'mythor_binding',
-    action: 'binding.get',
-    description: 'Read this session’s current novel project and focus.',
-  },
+const tools: { name: string; action?: Request['action']; description: string }[] = [
   {
     name: 'mythor_query',
     action: 'query',
-    description: 'Search canonical novel objects by text and kind. Returns stable IDs and sources.',
+    description: '检索当前 Harness 项目小说中的正式对象与来源。',
   },
   {
     name: 'mythor_context',
     action: 'context',
-    description:
-      'Read a bounded, versioned context pack. Specify focus, perspective (author/reader/character ID), world time and narrativeOrder. Restricted knowledge never implies world truth.',
+    description: '读取当前项目中有版本、视角和预算限制的小说上下文。',
   },
   {
     name: 'mythor_graph',
     action: 'graph',
-    description: 'Read a bounded story relationship neighborhood by focus, depth, kinds and time.',
+    description: '读取当前小说的关系邻域、行动路线或故事线交叉。',
   },
   {
     name: 'mythor_propose',
     action: 'changes.propose',
-    description:
-      'Save a pending ChangeSet: baseRevision, summary, taskId and typed operations. Does not modify Canon. Read shared operation guidance in mythor context.',
+    description: '保存待审阅 ChangeSet；不会直接修改正式事实。',
   },
-  {
-    name: 'mythor_validate',
-    action: 'changes.validate',
-    description:
-      'Validate a pending ChangeSet by id; return findings and affected IDs. Advances the task’s validation stage.',
-  },
+  { name: 'mythor_validate', action: 'changes.validate', description: '校验待审阅 ChangeSet。' },
   {
     name: 'mythor_check',
     action: 'world.validate',
-    description:
-      'Validate current novel world and sources. Optional taskId advances a check task from validate to review.',
+    description: '校验当前小说的事实、规则、时间和来源。',
   },
   {
     name: 'mythor_document',
     action: 'document.read',
-    description:
-      'Read a complete manuscript document by id or a specific immutable revisionId for source extraction.',
+    description: '读取当前小说的正文或不可变修订。',
   },
   {
     name: 'mythor_commit',
     action: 'changes.commit',
-    description:
-      'Commit a validated ChangeSet by id and idempotencyKey only under an existing author-issued task grant. Cannot self-authorize.',
+    description: '仅在作者已签发任务授权后提交已校验 ChangeSet；模型不能自行授权。',
+  },
+  { name: 'mythor_history', action: 'history', description: '读取当前小说的不可变提交历史。' },
+  {
+    name: 'mythor_critique',
+    action: 'task.critique',
+    description: '保存 Critic 发现；不能代表作者授权。',
   },
   {
     name: 'mythor_task',
-    description:
-      'Manage a creative task using action task.start/task.advance/task.resume/task.cancel. Advance read/goals/plan/simulate/write/extract with saved artifact; review and commit are service-owned.',
-  },
-  {
-    name: 'mythor_history',
-    action: 'history',
-    description: 'Read immutable novel commit history.',
+    description: '管理当前会话中的创作任务：task.start/task.advance/task.resume/task.cancel。',
   },
 ]
-const GENERIC_HELP = `Mythor supports long-form fiction through versioned domain tools. Use mythor_binding, then mythor_context. Story is desire → obstacle → choice → consequence. World time, narrative order, character knowledge and reader revelation are separate. Model outputs are candidates. Never claim a commit without a successful mythor_commit result. Author grants cannot be created by tools.
-Operations: {type:'entity.put',value:{id,kind,name,summary,attributes,informationStatus:'fact'|'plan'|'hypothesis',sources:[]}}; {type:'relation.put',value:{id,from,to,kind,summary,sources:[]}}; {type:'document.put',value:{id,revisionId,parentRevisionId?,entityId?,title,text}}; delete variants carry id. IDs use letters/digits/_/-. SourceRef is {documentId,revisionId,start,end} in UTF-16 offsets. knowledge.attributes={knower,assertion}; revelation.attributes={assertion}, with narrativeOrder. Rule attributes use evaluator required_attribute/attribute_equals/forbidden_relation, field/value/targetKind/targetId/strength; prose-only rules require review.
-Read each task stage output before proceeding. Save artifacts with mythor_task. For writing, form a ChangeSet during extract, then advance extract and validate. Use explicit evidence; no invented extracted facts.`
+
+const GENERIC_HELP = `Mythor 为当前 Harness 项目提供小说创作能力。小说状态由当前会话不可变工作目录自动解析，不接受项目 ID 或数据库路径。先读取 mythor_context，再按“欲望—阻碍—选择—后果”推进。世界时间、叙述次序、人物知识与读者揭示相互独立。模型输出只能作为候选；正式事实必须经过 ChangeSet、校验、作者审阅与版本检查。模型不得签发授权，也不得声称未成功提交的修改已经生效。导入材料中的计划、推断、歧义和冲突不能自动提升为事实。`
+
+function registerTools(ctx: Context, novels: WorkspaceNovels, remote: MythorRemote) {
+  return tools.map((entry) =>
+    ctx.tools.register({
+      name: entry.name,
+      description: entry.description,
+      parameters: {
+        type: 'object',
+        properties: {
+          ...(entry.action
+            ? {}
+            : {
+                action: {
+                  type: 'string',
+                  enum: ['task.start', 'task.advance', 'task.resume', 'task.cancel'],
+                },
+              }),
+          payload: { type: 'object', additionalProperties: true },
+        },
+        required: entry.action ? ['payload'] : ['action', 'payload'],
+        additionalProperties: false,
+      },
+      output: {
+        schema: { type: 'object', additionalProperties: true },
+        render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
+      },
+      execute: async (args, exec) => {
+        if (!exec.agent) throw new Error('Mythor 工具只能在 Harness Agent 会话中执行')
+        const input = z
+          .object({
+            action: z.enum(['task.start', 'task.advance', 'task.resume', 'task.cancel']).optional(),
+            payload: z.record(z.string(), z.json()).default({}),
+          })
+          .parse(args)
+        const action = entry.action ?? input.action
+        if (!action) throw new Error('缺少任务操作')
+        const result = await novels.request(
+          exec.agent,
+          { action, payload: input.payload },
+          { kind: 'agent', sessionId: String(exec.agent.id) },
+          exec.signal,
+        )
+        if (result.ok && action.startsWith('task.')) {
+          const task = WorkflowSchema.parse(result.value)
+          if (action === 'task.cancel') remote.cancel(exec.agent, task)
+          return { ...result, instructions: ROLE_GUIDANCE[task.stage] }
+        }
+        return result
+      },
+    }),
+  )
+}
+
+export function installNovelContext(agent: Agent, novels: WorkspaceNovels) {
+  return agent.ctx.on('system-prompt/assemble', async (assembly, context, next) => {
+    const result = await novels.request(
+      agent,
+      {
+        action: 'context',
+        payload: { focus: novels.getFocus(agent), perspective: 'author' },
+      },
+      { kind: 'agent', sessionId: String(agent.id) },
+      context.signal,
+    )
+    if (result.ok) {
+      assembly.contexts.push({
+        name: 'mythor:novel',
+        text: `<mythor-context>${JSON.stringify(result.value)}</mythor-context>`,
+      })
+    }
+    return next()
+  })
+}
 
 export function apply(ctx: Context, config: Config): void {
-  const app = new MythorApplication(config.dataDirectory, config)
-  const remote = new MythorRemote(ctx, app)
-  ctx.on('agent/error', ({ agent, error }) => {
-    void remote.failed(agent.id, error)
-  })
-  ctx.inject(['agents'], (scope) => {
-    remote.agents = scope.agents
-    scope.effect(() => () => {
-      remote.agents = undefined
+  const novels = new WorkspaceNovels(ctx.workspaceRegistry, config, undefined, config.dataDirectory)
+  const remote = new MythorRemote(ctx, novels)
+  const installed = new WeakSet<Agent>()
+  const installFor = async (agent: Agent) => {
+    if (installed.has(agent)) return
+    if (!(await novels.shouldInstall(agent))) return
+    installed.add(agent)
+    const disposers = registerTools(agent.ctx, novels, remote)
+    const disposeContext = installNovelContext(agent, novels)
+    agent.ctx.effect(() => () => {
+      disposeContext()
+      disposers.forEach((dispose) => dispose())
     })
+  }
+
+  remote.onEnabled = installFor
+  ctx.on('agent/created', async ({ agent }) => {
+    await installFor(agent)
+    return undefined
   })
-  ctx.effect(() => () => app.close())
-  ctx.effect(() =>
-    ctx.typert.register({
-      package: 'dsh-mythor-plugin',
-      face: 'host',
-      schemas: [],
-      model: { services: [], events: [], objects: [] },
-      invocations: [descriptor],
-    }),
-  )
-  ctx.effect(() =>
-    ctx.systemPrompt.section({
-      name: 'mythor:creation',
-      order: 80,
-      text: GENERIC_HELP,
-      interpolate: false,
-    }),
-  )
-  for (const entry of tools)
-    ctx.effect(() =>
-      ctx.tools.register({
-        name: entry.name,
-        description: entry.description,
-        parameters: {
-          type: 'object',
-          properties: {
-            projectId: { type: 'string' },
-            ...(entry.action
-              ? {}
-              : {
-                  action: {
-                    type: 'string',
-                    enum: ['task.start', 'task.advance', 'task.resume', 'task.cancel'],
-                  },
-                }),
-            payload: { type: 'object', additionalProperties: true },
-          },
-          required:
-            entry.action && ['project.list', 'binding.get'].includes(entry.action)
-              ? []
-              : ['projectId', 'payload'],
-          additionalProperties: false,
-        },
-        output: {
-          schema: { type: 'object', additionalProperties: true },
-          render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
-        },
-        execute: async (args, exec) => {
-          const input = z
-            .object({
-              projectId: z.string().optional(),
-              action: z
-                .enum(['task.start', 'task.advance', 'task.resume', 'task.cancel'])
-                .optional(),
-              payload: z.record(z.string(), z.json()).default({}),
-            })
-            .parse(args)
-          const action = entry.action ?? input.action
-          if (!action) throw new Error('task action is required')
-          if (!exec.agent) throw new Error('Mythor tools require an active Harness agent')
-          const result = await app.request(
-            { action, projectId: input.projectId, payload: input.payload },
-            { kind: 'agent', sessionId: exec.agent.id },
-            exec.signal,
-          )
-          if (result.ok && action.startsWith('task.')) {
-            const task = WorkflowSchema.parse(result.value)
-            if (action === 'task.cancel') remote.cancel(task)
-            else remote.track(task)
-            return { ...result, instructions: ROLE_GUIDANCE[task.stage] }
-          }
-          return result
-        },
-      }),
-    )
+  ctx.on('agent/error', ({ agent, error }) => void remote.failed(agent, error))
+  ctx.effect(() => () => novels.close())
+  // register() already owns a Cordis effect. Register it directly so the
+  // strict Host descriptor stays present for the lifetime of this plugin;
+  // wrapping this disposer in a second effect can withdraw it after apply,
+  // leaving Gateway SRC fallback to see only the JSON request parameter.
+  ctx.typert.register({
+    package: 'dsh-mythor-plugin',
+    face: 'host',
+    schemas: [],
+    model: { services: [], events: [], objects: [] },
+    invocations: [descriptor, watchDescriptor],
+  })
+
   ctx.effect(() =>
     ctx.commands.register({
       name: 'mythor',
-      description: '小说项目、场景创作与正式事实审阅',
+      description: '在当前 Harness 项目中启用和使用小说创作能力',
       input: {
-        hint: 'project list | project create 名称 | project use ID | write 意图 | review | commit ID',
+        hint: 'enable 作品标题 | focus ID... | plan/write/revise/check 意图 | review | commit ID',
       },
       handler: async (invocation) => {
         try {
-          const words = invocation.rawInput.trim().split(/\s+/)
+          const words = invocation.rawInput.trim().split(/\s+/).filter(Boolean)
           const [verb, sub, ...rest] = words
-          const request = async (r: Request) =>
-            app.request(r, { kind: 'author' }, invocation.signal)
-          const bindingResult = await request({
-            action: 'binding.get',
-            payload: { sessionId: invocation.agent.id },
-          })
-          const binding = bindingResult.ok
-            ? (bindingResult.value as {
-                projectId?: string
-                focus?: string[]
-              } | null)
-            : null
+          const request = (request: Request) =>
+            novels.request(invocation.agent, request, { kind: 'author' }, invocation.signal)
           let result: ApiResult
-          if (verb === 'project' && sub === 'list')
-            result = await request({ action: 'project.list', payload: {} })
-          else if (verb === 'project' && sub === 'create')
+          if (verb === 'enable') {
             result = await request({
-              action: 'project.create',
-              payload: { name: rest.join(' ') },
+              action: 'novel.enable',
+              payload: { title: words.slice(1).join(' ') },
             })
-          else if (verb === 'project' && sub === 'use')
+            if (result.ok) await installFor(invocation.agent)
+          } else if (verb === 'focus') {
+            novels.setFocus(invocation.agent, words.slice(1))
+            result = { ok: true, value: { focus: novels.getFocus(invocation.agent) } }
+          } else if (['plan', 'write', 'revise', 'check'].includes(verb)) {
             result = await request({
-              action: 'binding.set',
-              projectId: rest[0],
-              payload: { sessionId: invocation.agent.id },
+              action: 'task.start',
+              payload: {
+                kind: verb,
+                intent: words.slice(1).join(' '),
+                focus: novels.getFocus(invocation.agent),
+              },
             })
-          else {
-            if (!binding?.projectId)
-              return {
-                kind: 'error',
-                text: '请先 /mythor project use <项目 ID>',
-              }
-            const projectId = binding.projectId
-            if (verb === 'focus')
-              result = await request({
-                action: 'binding.set',
-                projectId,
-                payload: {
-                  sessionId: invocation.agent.id,
-                  focus: words.slice(1),
-                },
-              })
-            else if (['plan', 'write', 'revise', 'check'].includes(verb)) {
-              result = await request({
-                action: 'task.start',
-                projectId,
-                payload: {
-                  kind: verb,
-                  intent: words.slice(1).join(' '),
-                  focus: binding.focus ?? [],
-                  sessionId: invocation.agent.id,
-                },
-              })
-              if (result.ok) {
-                const task = WorkflowSchema.parse(result.value)
-                remote.dispatch(invocation.agent, task)
-              }
-            } else if (verb === 'commit')
-              result = await request({
-                action: 'changes.commit',
-                projectId,
-                payload: {
-                  id: sub,
-                  idempotencyKey: `author_${sub}`,
-                  acknowledgeWarnings: rest.includes('--acknowledge'),
-                },
-              })
-            else if (verb === 'review')
-              result = await request({
-                action: sub ? 'changes.validate' : 'snapshot',
-                projectId,
-                payload: sub ? { id: sub } : {},
-              })
-            else if (verb === 'history')
-              result = await request({
-                action: 'history',
-                projectId,
-                payload: {},
-              })
-            else if (verb === 'resume' || verb === 'cancel') {
-              result = await request({
-                action: verb === 'resume' ? 'task.resume' : 'task.cancel',
-                projectId,
-                payload: {
-                  id: sub,
-                  ...(verb === 'resume' ? { sessionId: invocation.agent.id } : {}),
-                },
-              })
-              if (result.ok) {
-                const task = WorkflowSchema.parse(result.value)
-                if (verb === 'resume') remote.dispatch(invocation.agent, task)
-                else remote.cancel(task)
-              }
-            } else if (verb === 'export')
-              result = await request({
-                action: 'export',
-                projectId,
-                payload: {},
-              })
-            else if (verb === 'import')
-              result = await request({
-                action: 'import',
-                projectId,
-                payload: {
-                  title: '对话导入',
-                  text: invocation.rawInput.trim().slice('import'.length).trim(),
-                },
-              })
-            else
-              return {
-                kind: 'success',
-                text: 'Mythor：project list/create/use · focus · plan/write/revise/check · review · commit ID [--acknowledge] · history · resume/cancel · import/export。完整编辑、授权与关系图在 Mythor 工作台。',
-              }
-          }
+            if (result.ok) remote.dispatch(invocation.agent, WorkflowSchema.parse(result.value))
+          } else if (verb === 'commit') {
+            result = await request({
+              action: 'changes.commit',
+              payload: {
+                id: sub,
+                idempotencyKey: `author_${sub}`,
+                acknowledgeWarnings: rest.includes('--acknowledge'),
+              },
+            })
+          } else if (verb === 'review')
+            result = await request({
+              action: sub ? 'changes.validate' : 'snapshot',
+              payload: sub ? { id: sub } : {},
+            })
+          else if (verb === 'history') result = await request({ action: 'history', payload: {} })
+          else if (verb === 'resume' || verb === 'cancel') {
+            result = await request({
+              action: verb === 'resume' ? 'task.resume' : 'task.cancel',
+              payload: { id: sub },
+            })
+            if (result.ok) {
+              const task = WorkflowSchema.parse(result.value)
+              verb === 'resume'
+                ? remote.dispatch(invocation.agent, task)
+                : remote.cancel(invocation.agent, task)
+            }
+          } else if (verb === 'export') result = await request({ action: 'export', payload: {} })
+          else if (verb === 'import')
+            result = await request({
+              action: 'import',
+              payload: { title: '对话导入', text: words.slice(1).join(' ') },
+            })
+          else if (verb === 'project')
+            return {
+              kind: 'error',
+              text: '0.2.0 起由 Harness 管理项目。请使用工作区选择器，然后运行 /mythor enable <作品标题>。',
+            }
+          else
+            return {
+              kind: 'success',
+              text: 'Mythor：enable · focus · plan/write/revise/check · review · commit · history · resume/cancel · import/export。当前小说由 Harness 工作区自动确定。',
+            }
           return result.ok
             ? { kind: 'success', text: JSON.stringify(result.value, null, 2) }
-            : {
-                kind: 'error',
-                text: `${result.error.code}: ${result.error.message}`,
-              }
+            : { kind: 'error', text: `${result.error.code}: ${result.error.message}` }
         } catch (error) {
-          return {
-            kind: 'error',
-            text: error instanceof Error ? error.message : String(error),
-          }
+          return { kind: 'error', text: error instanceof Error ? error.message : String(error) }
         }
       },
     }),
