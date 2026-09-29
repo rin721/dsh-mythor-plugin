@@ -17,7 +17,24 @@ import {
   type WorkflowRun,
 } from '../src/shared/contracts.ts'
 import { validate } from '../src/domain/validation.ts'
+import { changeHash } from '../src/domain/continuity.ts'
+import { splitMaterial } from '../src/domain/materials.ts'
+import { DatabaseSync } from 'node:sqlite'
+import { existsSync } from 'node:fs'
 const author: Actor = { kind: 'author' }
+const artifacts: Record<string, Json> = {
+  read: { revision: 0, evidenceIds: [], missing: ['kept'] },
+  goals: { direction: '地图交易', goal: '取得地图', obstacle: '对方不信任' },
+  plan: { planId: 'scene_plan', choices: ['交换消息'], expectedConsequences: ['得到地图'] },
+  simulate: { changes: ['地图转交'], unknowns: [] },
+  write: { documentId: 'scene', revisionId: 'scene_v1', planId: 'scene_plan', perspective: 'lin' },
+  extract: {
+    documentRevisionIds: ['scene_v1'],
+    changes: ['获得地图'],
+    unchanged: ['世界规则'],
+    uncertainties: [],
+  },
+}
 let store: Store, root: string
 const entity = (id: string, kind: Entity['kind'] = 'character', extra: Partial<Entity> = {}) =>
   EntitySchema.parse({ id, kind, name: id, ...extra })
@@ -38,12 +55,87 @@ function propose(operations: Operation[], taskId?: string) {
   )
 }
 function commit(change: ChangeSet, actor = author, key: string = randomUUID()) {
-  return call<Commit>('changes.commit', { id: change.id, idempotencyKey: key }, actor)
+  return call<Commit>(
+    'changes.commit',
+    { id: change.id, idempotencyKey: key, acknowledgeWarnings: actor.kind === 'author' },
+    actor,
+  )
 }
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'mythor-test-'))
   store = new Store(root)
   store.execute({ action: 'novel.enable', payload: { title: '车站与地图' } }, author)
+})
+it('rejects forged policy receipts and requires author decisions for major changes even when the critic is silent', () => {
+  const change = propose([
+    { type: 'entity.put', value: entity('new-rule', 'rule', { informationStatus: 'fact' }) },
+  ])
+  expect(() =>
+    call('scene.evidence', { id: change.id, report: {} }, { kind: 'agent', sessionId: 'model' }),
+  ).toThrow(/宿主/)
+  const policy: Actor = {
+    kind: 'policy',
+    changeHash: changeHash(change),
+    reason: 'scene-reconciliation',
+  }
+  call(
+    'scene.evidence',
+    {
+      id: change.id,
+      report: { findings: [], majorDecisions: [], proseConsistent: true, extractionComplete: true },
+    },
+    policy,
+  )
+  expect(() => commit(change, policy)).toThrow(/作者确认/)
+  expect(call<Snapshot>('snapshot').novel.revision).toBe(0)
+})
+it('merges persistent session drafts without losing focus or author interview references', () => {
+  call('session.save', { id: 'root', value: { editor: { text: '尚未保存的中文正文' } } })
+  call('session.save', { id: 'root', value: { focus: ['hero'] } })
+  expect(call('session.state', { id: 'root' })).toEqual({
+    editor: { text: '尚未保存的中文正文' },
+    focus: ['hero'],
+  })
+})
+it('splits immutable materials into bounded resumable batches without losing text or surrogate pairs', () => {
+  const text = '天空😀\r\n'.repeat(8000)
+  const batches = splitMaterial(text)
+  expect(batches.join('')).toBe(text)
+  expect(batches.every((b) => b.length <= 12000 && !/[\uD800-\uDBFF]$/.test(b))).toBe(true)
+})
+it('backs up a v2 database before upgrading and preserves task products for revalidation', () => {
+  const task = call<WorkflowRun>('task.start', { kind: 'write', intent: '继续', sessionId: 'old' })
+  call('task.advance', { id: task.id, stage: 'read', artifact: artifacts.read })
+  store.close()
+  const db = new DatabaseSync(join(root, 'novel.sqlite'))
+  db.exec('PRAGMA user_version=2')
+  db.close()
+  store = new Store(root)
+  expect(existsSync(join(root, 'novel.v2-backup.sqlite'))).toBe(true)
+  expect(call<WorkflowRun>('task.read', { id: task.id })).toMatchObject({
+    needsRevalidation: true,
+    artifacts: { read: artifacts.read },
+  })
+  expect(JSON.parse(call<{ text: string }>('backup').text).version).toBe(3)
+})
+it('rejects cyclic or inverted planning hierarchies', () => {
+  const a = entity('a', 'plan', {
+    attributes: {
+      level: 'scene',
+      parentId: 'b',
+      goal: '进入',
+      constraints: [],
+      status: 'active',
+      entityIds: [],
+      baseRevision: 0,
+    },
+  })
+  const b = entity('b', 'plan', { attributes: { ...a.attributes, parentId: 'a' } })
+  const change = propose([
+    { type: 'entity.put', value: a },
+    { type: 'entity.put', value: b },
+  ])
+  expect(() => commit(change)).toThrow(/阻止提交/)
 })
 afterEach(() => {
   store.close()
@@ -199,6 +291,46 @@ describe('formal story commits', () => {
 })
 
 describe('epistemic and temporal boundaries', () => {
+  it('reports critical omissions with fifty chapters instead of treating budget truncation as complete', () => {
+    const operations: Operation[] = Array.from({ length: 50 }, (_, i) => ({
+      type: 'document.put',
+      value: {
+        id: `chapter${i}`,
+        revisionId: `rev${i}`,
+        title: `第${i + 1}章`,
+        text: '历史正文。'.repeat(1000),
+      },
+    }))
+    for (let i = 0; i < 50; i++)
+      operations.push({
+        type: 'entity.put',
+        value: entity(`rule${i}`, 'rule', {
+          summary: '关键世界约束'.repeat(100),
+          informationStatus: 'fact',
+          editorialStatus: 'accepted',
+        }),
+      })
+    operations.push(
+      { type: 'entity.put', value: entity('focus', 'character') },
+      {
+        type: 'entity.put',
+        value: entity('truth', 'assertion', {
+          attributes: { value: '秘密' },
+          informationStatus: 'fact',
+        }),
+      },
+      {
+        type: 'entity.put',
+        value: entity('known', 'knowledge', {
+          attributes: { knower: 'focus', assertion: 'truth', mode: 'known' },
+        }),
+      },
+    )
+    commit(propose(operations))
+    expect(() => call('context', { focus: ['focus'] })).toThrow(
+      '关键依据与缺口说明超过预算，暂停写作',
+    )
+  })
   it('bounds the serialized context including dense relationships and quoted text', () => {
     const operations: Operation[] = Array.from({ length: 12 }, (_, i) => ({
       type: 'entity.put',
@@ -286,7 +418,7 @@ describe('epistemic and temporal boundaries', () => {
       call<{ entities: Entity[] }>('context', { perspective: 'lin', time: 9 }).entities.map(
         (e) => e.id,
       ),
-    ).toContain('secret')
+    ).not.toContain('secret')
     expect(
       call<{ entities: Entity[] }>('context', { perspective: 'reader', narrativeOrder: 2 })
         .entities,
@@ -344,7 +476,7 @@ describe('workflow authority', () => {
       call('task.advance', { id: task.id, stage: 'write', artifact: '草稿' }, agent),
     ).toThrow('当前需要完成')
     for (const stage of ['read', 'goals', 'plan', 'simulate', 'write', 'extract'])
-      call('task.advance', { id: task.id, stage, artifact: `${stage}产物` }, agent)
+      call('task.advance', { id: task.id, stage, artifact: artifacts[stage] }, agent)
     const change = propose([{ type: 'entity.put', value: entity('lin') }], task.id)
     call('changes.validate', { id: change.id }, agent)
     expect(() => commit(change, agent)).toThrow('授权')
@@ -358,29 +490,29 @@ describe('workflow authority', () => {
   })
   it('cancellation revokes authority and preserves artifacts', () => {
     const task = call<WorkflowRun>('task.start', { kind: 'write', intent: 'draft' })
-    call('task.advance', { id: task.id, stage: 'read', artifact: { evidence: 'kept' } })
+    call('task.advance', { id: task.id, stage: 'read', artifact: artifacts.read })
     call('task.cancel', { id: task.id })
-    expect(call<Snapshot>('snapshot').tasks[0].artifacts.read).toEqual({ evidence: 'kept' })
+    expect(call<Snapshot>('snapshot').tasks[0].artifacts.read).toEqual(artifacts.read)
     expect(() => call('task.advance', { id: task.id, stage: 'goals', artifact: 'x' })).toThrow(
       '已结束',
     )
   })
   it('records model failure without losing artifacts and resumes from that stage', () => {
     const task = call<WorkflowRun>('task.start', { kind: 'write', intent: 'draft' })
-    call('task.advance', { id: task.id, stage: 'read', artifact: { evidence: 'kept' } })
+    call('task.advance', { id: task.id, stage: 'read', artifact: artifacts.read })
     call('task.fail', { id: task.id, error: 'model unavailable' })
     expect(() => call('task.advance', { id: task.id, stage: 'goals', artifact: 'x' })).toThrow(
       '失败',
     )
     const resumed = call<WorkflowRun>('task.resume', { id: task.id })
     expect(resumed.stage).toBe('goals')
-    expect(resumed.artifacts.read).toEqual({ evidence: 'kept' })
+    expect(resumed.artifacts.read).toEqual(artifacts.read)
     expect(resumed.error).toBeUndefined()
   })
   it('keeps Critic uncertainty in review even under an author grant', () => {
     const task = call<WorkflowRun>('task.start', { kind: 'write', intent: '地图交易' }, agent)
     for (const stage of ['read', 'goals', 'plan', 'simulate', 'write', 'extract'])
-      call('task.advance', { id: task.id, stage, artifact: { done: stage } }, agent)
+      call('task.advance', { id: task.id, stage, artifact: artifacts[stage] }, agent)
     call(
       'task.critique',
       {
@@ -416,7 +548,7 @@ describe('workflow authority', () => {
     expect(result.chapters).toBe(2)
     expect(call<Snapshot>('snapshot').documents).toHaveLength(0)
     commit(result.change)
-    expect(call<Snapshot>('snapshot').documents).toHaveLength(2)
+    expect(call<Snapshot>('snapshot').documents).toHaveLength(3)
     expect(call<Snapshot>('snapshot').entities.every((e) => e.kind === 'chapter')).toBe(true)
   })
   it('resumes an imported task in the author-selected execution session', () => {

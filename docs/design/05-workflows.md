@@ -24,6 +24,8 @@ plan 流程在 simulate 后进入 review；check 流程以诊断结束，作者�
 
 ## 上下文与记忆
 
+0.3 的默认路径由 [创作协调管线](11-creative-loop.md) 执行：普通语言理解 → 分层规划 → 前置推演 → 隔离写作 → 九类提取 → 独立复核 → Host 接纳或原生作者决定。阶段 JSON 必须通过 StageArtifacts，任意 JSON 不代表完成。旧任务与 grant 仅为兼容路径；可消费规划进入 Entity，不留在任务 JSON 中。
+
 ContextPack 包含 novelId、revision、StorySeed、focus、perspective、time、查询结果、来源、待审阅变更、进行中任务和截断说明。已启用 Agent 在公开的异步 `system-prompt/assemble` 扩展点为每次模型请求从当前工作区重新读取，并作为宿主运行时上下文快照加入组装结果。检索顺序：固定创作约束 → 故事种子 → 焦点对象 → 相关事件与关系 → 人物知识 → 最近正文 → 全文补充。按字符预算裁剪材料，优先保留规则及对象证据；预算不足时明确报告缺口，不能把未加载的规则视为不存在。
 
 长期事实来自项目数据库；阶段工作记忆来自 WorkflowRun；知识材料保留原始来源；经验总结必须带适用条件及支持案例，作为可撤销建议，不自动改动 Canon。首版不依赖 embedding。

@@ -82,6 +82,7 @@ export function validate(world: World, revisions: Document[] = world.documents):
     if (doc.entityId && !entities.has(doc.entityId))
       add('dangling-document', '正文关联对象不存在', [doc.entityId])
   for (const rel of world.relations) {
+    if (rel.stale) add('stale-relation', '关系来源已修改，需要重新提取', [rel.id], 'warning')
     if (!entities.has(rel.from) || !entities.has(rel.to))
       add('dangling-relation', '关系引用的对象不存在', [rel.from, rel.to])
     const from = entities.get(rel.from)?.kind
@@ -111,6 +112,35 @@ export function validate(world: World, revisions: Document[] = world.documents):
     }
   }
   const edges = new Map<string, string[]>()
+  for (const rel of world.relations.filter((r) => r.kind === 'owns')) {
+    const competing = world.relations.find(
+      (r) =>
+        r.id !== rel.id &&
+        r.kind === 'owns' &&
+        r.to === rel.to &&
+        r.from !== rel.from &&
+        Math.max(r.time?.start ?? -Infinity, rel.time?.start ?? -Infinity) <=
+          Math.min(r.time?.end ?? Infinity, rel.time?.end ?? Infinity),
+    )
+    if (competing)
+      add('item-ownership', '同一时间物品有相互冲突的持有者', [rel.from, competing.from, rel.to])
+  }
+  for (const rel of world.relations.filter(
+    (r) => r.kind === 'located_at' && entities.get(r.from)?.kind === 'character',
+  )) {
+    if (
+      world.relations.some(
+        (r) =>
+          r.id !== rel.id &&
+          r.kind === 'located_at' &&
+          r.from === rel.from &&
+          r.to !== rel.to &&
+          Math.max(r.time?.start ?? -Infinity, rel.time?.start ?? -Infinity) <=
+            Math.min(r.time?.end ?? Infinity, rel.time?.end ?? Infinity),
+      )
+    )
+      add('location-overlap', '人物在同一时间出现于不同地点', [rel.from])
+  }
   for (const rel of world.relations.filter((r) => ['before', 'causes'].includes(r.kind)))
     edges.set(rel.from, [...(edges.get(rel.from) ?? []), rel.to])
   // Kahn's algorithm avoids exhausting the JS stack on long novel timelines.
@@ -230,7 +260,15 @@ export function validate(world: World, revisions: Document[] = world.documents):
 export function impacted(world: World, operations: Operation[]): string[] {
   const ids = new Set(
     operations.flatMap((op) =>
-      op.type === 'entity.put' ? [op.value.id] : op.type === 'entity.delete' ? [op.id] : [],
+      op.type === 'entity.put'
+        ? [op.value.id]
+        : op.type === 'entity.delete'
+          ? [op.id]
+          : op.type === 'relation.put'
+            ? [op.value.from, op.value.to]
+            : op.type === 'relation.delete'
+              ? world.relations.filter((r) => r.id === op.id).flatMap((r) => [r.from, r.to])
+              : [],
     ),
   )
   const docs = new Set(

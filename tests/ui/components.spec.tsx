@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { userEvent } from '@testing-library/user-event'
 import { mountStyles } from '../../src/client/styles.ts'
-import { EnableControl } from '../../src/client/index.tsx'
+import { apply } from '../../src/client/index.tsx'
 import {
   Button,
   Field,
@@ -17,33 +17,27 @@ import {
 } from '../../src/client/ui/index.tsx'
 
 describe('Harness component adapters', () => {
-  it('shows a compact project initializer only in a blank conversation and closes after enable', async () => {
-    const activeApi = vi.fn(async () => ({ ok: true as const, value: { enabled: false } }))
-    const active = render(<EnableControl api={activeApi} session={{ blank: false }} />)
-    expect(screen.queryByRole('button', { name: 'Mythor' })).toBeNull()
-    expect(activeApi).toHaveBeenCalledOnce()
-    active.unmount()
-
-    const blankApi = vi.fn(async (request: { action: string }) =>
-      request.action === 'novel.status'
-        ? { ok: true as const, value: { enabled: false } }
-        : { ok: true as const, value: { enabled: true } },
-    )
-    render(<EnableControl api={blankApi} session={{ blank: true }} />)
-    await screen.findByRole('button', { name: 'Mythor' })
-    const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: 'Mythor' }))
-    await screen.findByRole('dialog', { name: '为当前 Harness 项目启用 Mythor' })
-    const enable = screen.getByRole('button', { name: '启用' })
-    expect(enable.hasAttribute('disabled')).toBe(true)
-    await user.type(screen.getByPlaceholderText('作品标题'), '探索未至之境')
-    await user.click(enable)
-    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
-    expect(screen.queryByRole('button', { name: 'Mythor' })).toBeNull()
-    expect(blankApi).toHaveBeenLastCalledWith({
-      action: 'novel.enable',
-      payload: { title: '探索未至之境' },
-    })
+  it('registers only the native workbench and leaves the conversation input free of activation controls', async () => {
+    const effects: Promise<unknown>[] = []
+    const registered: string[] = []
+    const context = {
+      effect: (factory: () => unknown) => {
+        effects.push(Promise.resolve(factory()))
+      },
+      inject: (_names: string[], callback: (scope: unknown) => void) => callback(context),
+      slots: {
+        inject: (_name: string, callback: () => unknown) => callback(),
+        register: (options: { name: string }) => {
+          registered.push(options.name)
+          return () => {}
+        },
+      },
+      locale: { register: () => () => {}, bind: () => (key: string) => key },
+      remote: { $mount: async () => async () => {} },
+    }
+    apply(context as unknown as Parameters<typeof apply>[0])
+    await Promise.all(effects)
+    expect(registered).toEqual(['conversation.view'])
   })
 
   it('registers and removes compiled styles with each workbench lifecycle', () => {

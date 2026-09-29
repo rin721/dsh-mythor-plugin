@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useState } from 'react'
+import { useEffect, useLayoutEffect, useState, useRef } from 'react'
 import {
   EntitySchema,
   KINDS,
@@ -211,6 +211,68 @@ export function App({
   const [legacyNovels, setLegacyNovels] = useState<
     { id: string; name: string; revision: number; archived: boolean }[]
   >([])
+  const apiRef = useRef(api)
+  apiRef.current = api
+  const [draftReady, setDraftReady] = useState(false)
+  const draftApi = useRef<typeof api>()
+  useEffect(() => {
+    let live = true
+    setDraftReady(false)
+    if (!enabled)
+      return () => {
+        live = false
+      }
+    void api({ action: 'session.state', payload: {} })
+      .then((result) => {
+        if (!live || api !== apiRef.current) return
+        if (!result.ok) throw new Error(result.error.message)
+        if (result.ok) {
+          const saved = result.value as {
+            editor?: { documentId: string; title: string; text: string; entityId: string }
+            tab?: Key
+            graphFocus?: string
+          }
+          if (saved.editor) {
+            setDocumentId(saved.editor.documentId)
+            setDocTitle(saved.editor.title)
+            setDocText(saved.editor.text)
+            setDocEntity(saved.editor.entityId)
+          }
+          if (saved.tab && tabs.includes(saved.tab)) setTab(saved.tab)
+          if (saved.graphFocus) setGraphFocus(saved.graphFocus)
+        }
+        draftApi.current = api
+        setDraftReady(true)
+      })
+      .catch(() => {
+        if (live) setNotice('会话草稿暂时无法读取；当前输入仍保留，请重试连接。')
+      })
+    return () => {
+      live = false
+    }
+  }, [api, enabled])
+  useEffect(() => {
+    if (!enabled || !draftReady || draftApi.current !== api) return
+    const value = {
+      editor: { documentId, title: docTitle, text: docText, entityId: docEntity },
+      tab,
+      graphFocus,
+    }
+    const save = () => {
+      void api({ action: 'session.save', payload: { value } })
+        .then((result) => {
+          if (!result.ok) throw new Error(result.error.message)
+        })
+        .catch(() => {
+          if (api === apiRef.current) setNotice('会话草稿暂时无法保存；当前输入仍保留。')
+        })
+    }
+    const timer = setTimeout(save, 400)
+    return () => {
+      clearTimeout(timer)
+      save()
+    }
+  }, [api, enabled, draftReady, documentId, docTitle, docText, docEntity, tab, graphFocus])
   async function call<T>(
     action: Request['action'],
     payload: Record<string, Json> = {},
@@ -238,6 +300,7 @@ export function App({
       throw failure
     }
     setWorkspaceAvailable(true)
+    if (api !== apiRef.current) return
     setEnabled(status.enabled)
     if (!status.enabled) {
       setSnapshot(undefined)
@@ -248,6 +311,7 @@ export function App({
       call<Snapshot>('snapshot'),
       call<Commit[]>('history'),
     ])
+    if (api !== apiRef.current) return
     setSnapshot(nextSnapshot)
     setHistory(nextHistory)
   }
@@ -272,7 +336,7 @@ export function App({
   }
   useEffect(() => {
     void act(() => refresh(), false)
-  }, [])
+  }, [api])
   useEffect(() => subscribe?.(() => void act(() => refresh(), false)), [subscribe])
   useEffect(() => {
     if (enabled && tab === 'graph') void loadGraph()
@@ -429,14 +493,12 @@ export function App({
               <h2 className={cx('heading2')}>{t('help')}</h2>
               <p>{t('helpText')}</p>
               <div className={cx('row')}>
-                <Button onClick={() => setModal('enable')} variant="primary">
-                  启用 Mythor
-                </Button>
+                <Button onClick={() => setModal('import')}>迁入已有材料</Button>
                 {startConversation && (
                   <Button
                     onClick={() =>
                       startConversation(
-                        '我想写一部小说，请根据我的想法逐步提问，并把有效信息整理成 Mythor StorySeed 候选。每轮只问少量关键问题。',
+                        '我想写一个故事，但还没想完整。请先听我的想法，再用普通语言帮我逐步发展，每次最多问两个问题。',
                       )
                     }
                   >
@@ -469,7 +531,8 @@ export function App({
               </div>
             </div>
             <p className={cx('muted')}>
-              一部小说对应一个 Harness 项目；项目名称、目录与会话由 Harness 管理。
+              直接在对话里说出画面、人物或想法即可。探索时不会创建小说数据；确定继续创作后，Mythor
+              自动保存到当前项目，无需标题或启用命令。
             </p>
           </main>
         ) : (
@@ -624,11 +687,13 @@ export function App({
                           }}
                         >
                           <SelectOption value="">{t('newDocument')}</SelectOption>
-                          {snapshot.documents.map((d) => (
-                            <SelectOption key={d.id} value={d.id}>
-                              {d.title}
-                            </SelectOption>
-                          ))}
+                          {snapshot.documents
+                            .filter((d) => d.materialId !== d.id)
+                            .map((d) => (
+                              <SelectOption key={d.id} value={d.id}>
+                                {d.title}
+                              </SelectOption>
+                            ))}
                         </Select>
                         <Button
                           onClick={() => {
@@ -1288,9 +1353,13 @@ export function App({
             t={t}
             close={() => setModal(undefined)}
             busy={busy}
-            preview={(p) => call('import', { ...p, preview: true })}
+            preview={async (p) => {
+              if (!enabled) await call('novel.enable', { title: '未命名作品' })
+              return call('import', { ...p, preview: true })
+            }}
             save={(p) =>
               act(async () => {
+                if (!enabled) await call('novel.enable', { title: '未命名作品' })
                 await call('import', p)
                 await refresh()
                 setModal(undefined)

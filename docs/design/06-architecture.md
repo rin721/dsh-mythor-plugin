@@ -20,9 +20,9 @@ src/domain 不依赖 Harness、React 和数据库；src/storage 实现存储和�
 
 基线：DeepSeek Harness commit 21638c5631，包 0.1.7-rc.2。使用 dsh.bundle.patch、Host apply/inject、Client ./client 与 dsh.client manifest。所有注册均为 ctx.effect/ctx.on，并释放 worker、订阅及 scope 资源。
 
-使用 Agent scoped tools、ctx.commands、异步 `system-prompt/assemble` 与 agent.followup。公开服务通过 Agent-scoped Harness Typert Remote/原有 Connection 暴露；不自建 HTTP 服务或绕开宿主认证。Client 通过公开 `conversation.view` 注册 Mythor，并通过 `conversation.input.left` 提供首条消息前的紧凑入口，启用表单由官方 Modal 承载。
+使用 Agent scoped tools、ctx.commands、异步 `system-prompt/assemble` 与 agent.followup。公开服务通过 Agent-scoped Harness Typert Remote/原有 Connection 暴露；不自建 HTTP 服务或绕开宿主认证。Client 通过公开 `conversation.view` 注册工作台；0.3 不再往输入框放启用按钮，对话本身就是入口。
 
-模型看到的上下文经工具结果或 system prompt 的运行时 ContextSnapshot 进入宿主请求；不追加未知 SessionEvent。小说数据库拥有领域真源，Session log 拥有模型交互历史。两者通过 taskId、revisionId、changeSetId 和持久结果关联。
+模型上下文经工具结果或运行时 ContextSnapshot 进入宿主请求。探索与决定使用公开声明的 mythor/intake、mythor/decision SessionEvent 和 SessionQuery；不读取私有会话投影。小说库拥有领域真源，Session log 拥有交互历史。两者通过任务、修订、变更和真实消息引用关联。子 Agent 与问答均由官方服务提供，详见 [ADR 0004](../adr/0004-creative-coordination.md)。
 
 ## 公共契约
 

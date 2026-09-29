@@ -18,6 +18,7 @@ export const KINDS = [
   'knowledge',
   'revelation',
   'rule',
+  'plan',
 ] as const
 export const Source = z
   .object({
@@ -61,6 +62,7 @@ export const RelationSchema = z
     time: WorldTime.optional(),
     sources: z.array(Source).default([]),
     revision: z.number().int().nonnegative().default(0),
+    stale: z.boolean().optional(),
   })
   .strict()
 export const DocumentSchema = z
@@ -71,6 +73,8 @@ export const DocumentSchema = z
     text: z.string().max(5_000_000),
     revisionId: Id,
     parentRevisionId: Id.optional(),
+    materialKind: z.enum(['manuscript', 'outline', 'characters', 'world', 'notes']).optional(),
+    materialId: Id.optional(),
   })
   .strict()
 export const StorySeedSchema = z
@@ -160,6 +164,9 @@ export interface WorkflowRun {
   stage: Stage
   status: 'pending' | 'running' | 'waiting_review' | 'completed' | 'cancelled' | 'failed'
   artifacts: Partial<Record<Stage, Json>>
+  contractVersion?: number
+  needsRevalidation?: boolean
+  planId?: string
   critique?: z.infer<typeof CritiqueSchema>[]
   error?: string
 }
@@ -175,6 +182,9 @@ export const WorkflowSchema = z
     stage: z.enum(STAGES),
     status: z.enum(['pending', 'running', 'waiting_review', 'completed', 'cancelled', 'failed']),
     artifacts: z.partialRecord(z.enum(STAGES), z.json()),
+    contractVersion: z.number().int().optional(),
+    needsRevalidation: z.boolean().optional(),
+    planId: Id.optional(),
     critique: z.array(CritiqueSchema).optional(),
     error: z.string().optional(),
   })
@@ -222,7 +232,10 @@ export interface Commit {
   actor: string
   createdAt: string
 }
-export type Actor = { kind: 'author' } | { kind: 'agent'; sessionId: string }
+export type Actor =
+  | { kind: 'author' }
+  | { kind: 'agent'; sessionId: string }
+  | { kind: 'policy'; changeHash: string; reason: string }
 export const ACTIONS = [
   'novel.status',
   'novel.enable',
@@ -253,6 +266,15 @@ export const ACTIONS = [
   'export',
   'backup',
   'restore',
+  'task.list',
+  'task.read',
+  'session.state',
+  'session.save',
+  'material.list',
+  'material.read',
+  'material.advance',
+  'scene.evidence',
+  'decision.record',
 ] as const
 export const RequestSchema = z
   .object({
@@ -278,6 +300,7 @@ export interface ContextPack {
   gaps: string[]
   pending: { changes: string[]; tasks: string[] }
   truncated: boolean
+  coverage?: { required: string[]; missing: string[] }
 }
 export interface Limits {
   maxImportChars: number

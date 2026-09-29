@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite'
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomUUID, createHash } from 'node:crypto'
 import { z } from 'zod'
@@ -21,6 +21,7 @@ import {
   type ContextPack,
   type Document,
   type Entity,
+  type Finding,
   type Json,
   type Limits,
   type Operation,
@@ -34,6 +35,9 @@ import { MythorError, requireValue } from '../domain/errors.ts'
 import { applyOperations, impacted, validate } from '../domain/validation.ts'
 import { advance } from '../domain/workflows.ts'
 import { movement, crossings } from '../domain/projections.ts'
+import { changeHash, continuity, acceptanceRisks } from '../domain/continuity.ts'
+import { splitMaterial } from '../domain/materials.ts'
+import { MaterialSchema } from '../shared/creative.ts'
 
 const uid = () => randomUUID()
 const now = () => new Date().toISOString()
@@ -66,10 +70,12 @@ export class Store {
     mkdirSync(root, { recursive: true })
     this.database = new DatabaseSync(join(root, 'novel.sqlite'))
     const version = Number(this.database.prepare('PRAGMA user_version').get()?.user_version)
-    if (version > 2) {
+    if (version > 3) {
       this.database.close()
       throw new MythorError('future-schema', '数据库来自更新版本，拒绝写入')
     }
+    if (version === 2 && !existsSync(join(root, 'novel.v2-backup.sqlite')))
+      this.database.prepare('VACUUM INTO ?').run(join(root, 'novel.v2-backup.sqlite'))
     this.database.exec(
       'PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=3000; CREATE TABLE IF NOT EXISTS meta(id TEXT PRIMARY KEY, data TEXT NOT NULL)',
     )
@@ -78,8 +84,19 @@ export class Store {
         `CREATE TABLE IF NOT EXISTS ${table}(id TEXT PRIMARY KEY, data TEXT NOT NULL)`,
       )
     this.database.exec(
-      'CREATE TABLE IF NOT EXISTS receipts(id TEXT PRIMARY KEY, data TEXT NOT NULL); CREATE VIRTUAL TABLE IF NOT EXISTS search USING fts5(id UNINDEXED, kind UNINDEXED, tokens); PRAGMA user_version=2',
+      'CREATE TABLE IF NOT EXISTS receipts(id TEXT PRIMARY KEY, data TEXT NOT NULL); CREATE VIRTUAL TABLE IF NOT EXISTS search USING fts5(id UNINDEXED, kind UNINDEXED, tokens);',
     )
+    if (version === 2) {
+      this.database.exec('BEGIN IMMEDIATE')
+      try {
+        for (const task of this.all<WorkflowRun>(this.database, 'tasks'))
+          this.put(this.database, 'tasks', task.id, { ...task, needsRevalidation: true })
+        this.database.exec('PRAGMA user_version=3; COMMIT')
+      } catch (error) {
+        this.database.exec('ROLLBACK')
+        throw error
+      }
+    } else this.database.exec('PRAGMA user_version=3')
     for (const task of this.all<WorkflowRun>(this.database, 'tasks'))
       if (task.status === 'running')
         this.put(this.database, 'tasks', task.id, {
@@ -113,6 +130,7 @@ export class Store {
     ).run(id, stringify(value))
   }
   private novel(db: DatabaseSync): NovelState {
+    // Novel ownership is always resolved by the Host before entering this store.
     return decode<NovelState>(
       requireValue(
         db.prepare("SELECT data FROM meta WHERE id='novel'").get(),
@@ -125,6 +143,14 @@ export class Store {
     db.prepare(
       "INSERT INTO meta(id,data) VALUES('novel',?) ON CONFLICT(id) DO UPDATE SET data=excluded.data",
     ).run(stringify(novel))
+  }
+  private meta(db: DatabaseSync, id: string): Record<string, Json> | undefined {
+    const row = db.prepare('SELECT data FROM meta WHERE id=?').get(id)
+    return row ? decode<Record<string, Json>>(row) : undefined
+  }
+  private materials(db: DatabaseSync): Record<string, Json>[] {
+    const row = db.prepare("SELECT data FROM meta WHERE id='materials'").get()
+    return row ? z.array(MaterialSchema).parse(decode(row)) : []
   }
   private snapshot(db: DatabaseSync): Snapshot {
     return {
@@ -140,6 +166,11 @@ export class Store {
   execute(raw: Request, actor: Actor): Json {
     const req = RequestSchema.parse(raw)
     const p = req.payload
+    if (
+      ['scene.evidence', 'decision.record', 'material.advance'].includes(req.action) &&
+      actor.kind !== 'policy'
+    )
+      throw new MythorError('host-only', '接纳证据只能由宿主服务写入')
     if (actor.kind === 'agent') {
       if (
         [
@@ -190,6 +221,124 @@ export class Store {
     )
       throw new MythorError('novel-paused', '小说创作已暂停，请先恢复')
     switch (req.action) {
+      case 'task.list':
+        return safeJson(this.all<WorkflowRun>(db, 'tasks'))
+      case 'task.read':
+        return safeJson(this.get<WorkflowRun>(db, 'tasks', Body.parse(p).id))
+      case 'session.state':
+        return safeJson(this.meta(db, `session:${Id.parse(p.id)}`) ?? {})
+      case 'session.save': {
+        if (actor.kind !== 'author') throw new MythorError('author-only', '界面草稿只能由作者保存')
+        const key = `session:${Id.parse(p.id)}`
+        const value = { ...this.meta(db, key), ...z.record(z.string(), z.json()).parse(p.value) }
+        db.prepare('INSERT OR REPLACE INTO meta VALUES(?,?)').run(key, stringify(value))
+        return value
+      }
+      case 'scene.evidence': {
+        const change = this.get<ChangeSet>(db, 'changes', Body.parse(p).id)
+        if (actor.kind !== 'policy' || changeHash(change) !== actor.changeHash)
+          throw new MythorError('evidence-conflict', '候选已经改变')
+        db.prepare('INSERT OR REPLACE INTO meta VALUES(?,?)').run(
+          `coordination:${change.id}`,
+          stringify({ hash: actor.changeHash, report: p.report, reason: actor.reason }),
+        )
+        return true
+      }
+      case 'decision.record': {
+        db.prepare('INSERT OR REPLACE INTO meta VALUES(?,?)').run(
+          `decision:${Id.parse(p.id)}`,
+          stringify(p),
+        )
+        return true
+      }
+      case 'material.list':
+        return safeJson(
+          this.materials(db).map((m) => ({
+            id: m.id,
+            title: m.title,
+            kind: m.kind,
+            nextBatch: m.nextBatch,
+            batchCount: (m.batches as Json[]).length,
+            taskId: m.taskId ?? null,
+            pendingChangeId: m.pendingChangeId ?? null,
+            initialChangeId: m.initialChangeId ?? null,
+          })),
+        )
+      case 'material.read':
+        return safeJson(requireValue(this.materials(db).find((m) => m.id === Id.parse(p.id))))
+      case 'material.advance': {
+        const materials = this.materials(db),
+          index = materials.findIndex((m) => m.id === p.id)
+        if (index < 0) throw new MythorError('not-found', '材料不存在')
+        const previous = Number(materials[index].nextBatch)
+        const next = z
+          .number()
+          .int()
+          .min(previous)
+          .max(previous + 1)
+          .parse(p.nextBatch)
+        if (next > (materials[index].batches as Json[]).length)
+          throw new MythorError('material-checkpoint', '批次超出材料范围')
+        if (next > previous && p.changeId) {
+          const accepted = this.get<ChangeSet>(db, 'changes', Id.parse(p.changeId))
+          if (
+            accepted.status !== 'committed' ||
+            actor.kind !== 'policy' ||
+            changeHash(accepted) !== actor.changeHash
+          )
+            throw new MythorError('material-checkpoint', '批次尚未正式接纳')
+        }
+        materials[index] = {
+          ...materials[index],
+          nextBatch: p.nextBatch,
+          changeId: p.changeId,
+          pendingChangeId: p.pendingChangeId ?? null,
+        }
+        db.exec('BEGIN IMMEDIATE')
+        try {
+          db.prepare('INSERT OR REPLACE INTO meta VALUES(?,?)').run(
+            'materials',
+            stringify(materials),
+          )
+          if (
+            Array.isArray(materials[index].batches) &&
+            Number(p.nextBatch) >= (materials[index].batches as Json[]).length
+          ) {
+            const taskId = materials[index].taskId
+            if (typeof taskId === 'string') {
+              const task = this.maybe<WorkflowRun>(db, 'tasks', taskId)
+              if (task && task.status !== 'cancelled')
+                this.put(db, 'tasks', task.id, {
+                  ...task,
+                  stage: 'commit',
+                  status: 'completed',
+                  artifacts: {
+                    ...task.artifacts,
+                    extract: {
+                      documentRevisionIds: [materials[index].originalRevisionId],
+                      changes: ['材料各批已提取并处理'],
+                      unchanged: [],
+                      uncertainties: [],
+                    },
+                  },
+                })
+            }
+            for (const id of materials[index].documentIds as string[]) {
+              const doc = this.maybe<Document>(db, 'documents', id)
+              if (doc)
+                db.prepare('INSERT OR REPLACE INTO meta VALUES(?,?)').run(
+                  `document-state:${id}`,
+                  stringify({ revisionId: doc.revisionId, coordinated: true }),
+                )
+            }
+          }
+          db.exec('COMMIT')
+          return safeJson(materials[index])
+        } catch (error) {
+          db.exec('ROLLBACK')
+          throw error
+        }
+      }
       case 'novel.update': {
         const update = z
           .object({
@@ -337,8 +486,7 @@ export class Store {
         if (!cancel && task.baseRevision !== novel.revision) {
           next.baseRevision = novel.revision
           next.stage = 'read'
-          next.artifacts = {}
-          next.critique = undefined
+          next.needsRevalidation = true
           next.error = '项目版本改变，需要重新读取与规划；旧候选保留供比较'
         }
         this.put(db, 'tasks', task.id, next)
@@ -364,6 +512,9 @@ export class Store {
         return {
           name: `${novel.title}.md`,
           text: this.all<Document>(db, 'documents')
+            .filter(
+              (d) => d.materialId !== d.id && (!d.materialKind || d.materialKind === 'manuscript'),
+            )
             .sort(
               (a, b) =>
                 (order.get(a.entityId ?? '') ?? Infinity) -
@@ -428,7 +579,78 @@ export class Store {
   private check(db: DatabaseSync, change: ChangeSet) {
     const snapshot = this.snapshot(db)
     const next = applyOperations(snapshot, change.operations)
+    for (const op of change.operations)
+      if (
+        op.type === 'document.put' &&
+        this.materials(db).some((m) => m.id === op.value.id) &&
+        snapshot.documents.some(
+          (d) =>
+            d.id === op.value.id &&
+            (d.text !== op.value.text || d.revisionId !== op.value.revisionId),
+        )
+      )
+        throw new MythorError('material-immutable', '原始材料不可覆盖，请作为新来源迁入')
     const findings = validate(next, [...this.all<Document>(db, 'revisions'), ...next.documents])
+    findings.push(...continuity(snapshot, change.operations))
+    const evidence = this.meta(db, `coordination:${change.id}`)
+    if (evidence?.reason !== 'verified-author-idea')
+      for (const message of acceptanceRisks(snapshot, change.operations))
+        findings.push({
+          code: 'host-decision',
+          severity: 'warning',
+          message,
+          entityIds: [],
+          sources: [],
+        })
+    if (
+      evidence?.hash === changeHash(change) &&
+      evidence.report &&
+      typeof evidence.report === 'object' &&
+      !Array.isArray(evidence.report)
+    ) {
+      const report = evidence.report as Record<string, Json>
+      if (Array.isArray(report.findings))
+        findings.push(...(report.findings as unknown as Finding[]))
+      for (const message of [
+        ...(Array.isArray(report.majorDecisions) ? report.majorDecisions : []),
+        ...(Array.isArray(report.uncertainties) ? report.uncertainties : []),
+      ])
+        findings.push({
+          code: 'creative-decision',
+          severity: 'unknown',
+          message: String(message),
+          entityIds: [],
+          sources: [],
+        })
+      if (report.proseConsistent === false || report.extractionComplete === false)
+        findings.push({
+          code: 'scene-inconsistent',
+          severity: 'error',
+          message: '正文一致性或提取完整性未通过，需先修正',
+          entityIds: [],
+          sources: [],
+        })
+    }
+    if (
+      change.operations.some(
+        (o) =>
+          o.type === 'document.put' &&
+          !this.materials(db).some(
+            (m) =>
+              m.id === o.value.materialId &&
+              Array.isArray(m.documentIds) &&
+              m.documentIds.includes(o.value.id),
+          ),
+      ) &&
+      evidence?.hash !== changeHash(change)
+    )
+      findings.push({
+        code: 'coordination-required',
+        severity: 'warning',
+        message: '正文尚未提取和检查；接纳后必须协调才能继续写作',
+        entityIds: [],
+        sources: [],
+      })
     if (change.taskId)
       findings.push(...(this.get<WorkflowRun>(db, 'tasks', change.taskId).critique ?? []))
     if (change.baseRevision !== snapshot.novel.revision)
@@ -497,6 +719,19 @@ export class Store {
           safeJson(checked.findings),
         )
       if (actor.kind === 'agent') {
+        if (
+          change.operations.some(
+            (op) =>
+              op.type.startsWith('document.') ||
+              op.type.startsWith('relation.') ||
+              (op.type === 'entity.put' && op.value.informationStatus === 'fact'),
+          ) &&
+          this.meta(db, `coordination:${change.id}`)?.hash !== changeHash(change)
+        )
+          throw new MythorError(
+            'coordination-required',
+            '正式事实和正文需要宿主创作协调；任务授权不能替代提取与检查',
+          )
         if (!task || task.stage !== 'review' || !task.artifacts.validate)
           throw new MythorError('review-required', '模型提交需要已完成校验的任务')
         const grant = this.maybe<{ entityIds: string[]; expiresAt: string }>(db, 'grants', task.id)
@@ -520,6 +755,12 @@ export class Store {
       }
       const novel = this.novel(db)
       const revision = novel.revision + 1
+      if (
+        actor.kind === 'policy' &&
+        (actor.changeHash !== changeHash(change) ||
+          this.meta(db, `coordination:${change.id}`)?.hash !== actor.changeHash)
+      )
+        throw new MythorError('policy-required', '缺少宿主协调检查证据')
       const inverse: Operation[] = []
       const staleIds = new Set<string>()
       const changedDocuments = new Set<string>()
@@ -548,6 +789,15 @@ export class Store {
           if (op.type === 'document.put') {
             this.put(db, 'documents', id, op.value)
             this.put(db, 'revisions', op.value.revisionId, op.value)
+            const receipt = this.meta(db, `coordination:${change.id}`)
+            db.prepare('INSERT OR REPLACE INTO meta VALUES(?,?)').run(
+              `document-state:${id}`,
+              stringify({
+                revisionId: op.value.revisionId,
+                coordinated:
+                  receipt?.hash === changeHash(change) && receipt.reason !== 'raw-material',
+              }),
+            )
           } else db.prepare('DELETE FROM documents WHERE id=?').run(id)
           if (old) changedDocuments.add(id)
         } else {
@@ -562,7 +812,13 @@ export class Store {
         if (
           entity.sources.some(
             (s) =>
-              changedDocuments.has(s.documentId) && currentDocs.get(s.documentId) !== s.revisionId,
+              changedDocuments.has(s.documentId) &&
+              currentDocs.get(s.documentId) !== s.revisionId &&
+              !entity.sources.some(
+                (fresh) =>
+                  fresh.documentId === s.documentId &&
+                  fresh.revisionId === currentDocs.get(s.documentId),
+              ),
           )
         ) {
           if (
@@ -572,6 +828,24 @@ export class Store {
           this.put(db, 'entities', entity.id, { ...entity, stale: true, revision })
           staleIds.add(entity.id)
         }
+      for (const relation of this.all<Relation>(db, 'relations'))
+        if (
+          relation.sources.some(
+            (s) =>
+              changedDocuments.has(s.documentId) &&
+              currentDocs.get(s.documentId) !== s.revisionId &&
+              !relation.sources.some(
+                (fresh) =>
+                  fresh.documentId === s.documentId &&
+                  fresh.revisionId === currentDocs.get(s.documentId),
+              ),
+          )
+        ) {
+          inverse.unshift({ type: 'relation.put', value: relation })
+          this.put(db, 'relations', relation.id, { ...relation, stale: true, revision })
+          staleIds.add(relation.from)
+          staleIds.add(relation.to)
+        }
       const commit: Commit = {
         id: uid(),
         revision,
@@ -579,7 +853,12 @@ export class Store {
         summary: change.summary,
         operations: change.operations,
         inverse,
-        actor: actor.kind === 'author' ? 'author' : `agent:${actor.sessionId}`,
+        actor:
+          actor.kind === 'author'
+            ? 'author'
+            : actor.kind === 'policy'
+              ? `policy:${actor.reason}`
+              : `agent:${actor.sessionId}`,
         createdAt: now(),
       }
       this.put(db, 'commits', commit.id, commit)
@@ -608,6 +887,31 @@ export class Store {
           artifacts: { ...task.artifacts, commit: { commitId: commit.id, revision } },
         })
       db.prepare('INSERT INTO receipts VALUES(?,?)').run(input.idempotencyKey, stringify(commit))
+      if (actor.kind === 'policy' && actor.reason === 'verified-author-idea') {
+        const proof = this.meta(db, `coordination:${change.id}`)
+        const report = proof?.report as Record<string, Json> | undefined
+        if (typeof report?.sessionId === 'string' && Array.isArray(report.evidence)) {
+          const key = `session:${report.sessionId}`
+          const previous = this.meta(db, key) ?? {}
+          const seqs = report.evidence.flatMap((ref) =>
+            typeof ref === 'object' && ref && !Array.isArray(ref) && typeof ref.seq === 'number'
+              ? [ref.seq]
+              : [],
+          )
+          db.prepare('INSERT OR REPLACE INTO meta VALUES(?,?)').run(
+            key,
+            stringify({
+              ...previous,
+              intakeSeqs: [
+                ...new Set([
+                  ...(Array.isArray(previous.intakeSeqs) ? previous.intakeSeqs : []),
+                  ...seqs,
+                ]),
+              ],
+            }),
+          )
+        }
+      }
       this.reindex(db)
       db.exec('COMMIT')
       return commit
@@ -663,6 +967,7 @@ export class Store {
         intent: z.string().min(1),
         focus: z.array(Id).default([]),
         sessionId: Id.optional(),
+        planId: Id.optional(),
       })
       .parse(p)
     const task: WorkflowRun = {
@@ -674,6 +979,7 @@ export class Store {
       stage: 'read',
       status: 'pending',
       artifacts: {},
+      contractVersion: 3,
     }
     this.put(db, 'tasks', task.id, task)
     return task
@@ -690,6 +996,7 @@ export class Store {
       })
       .parse(p)
     const normalized = input.text.replace(/^\uFEFF/, '')
+    const materialId = uid()
     const parts =
       input.materialKind === 'manuscript'
         ? normalized
@@ -704,51 +1011,106 @@ export class Store {
           : input.materialKind === 'manuscript'
             ? `${input.title} ${index + 1}`
             : input.title
-      return { id: uid(), revisionId: uid(), title, text: lines.join('\n').trim() }
+      return {
+        id: uid(),
+        revisionId: uid(),
+        title,
+        text: lines.join('\n').trim(),
+        materialKind: input.materialKind,
+        materialId,
+      }
     })
     if (input.preview)
       return { chapters: documents.map((d) => ({ title: d.title, chars: d.text.length })) }
-    const task = this.startTask(
-      db,
-      { kind: 'import', intent: `提取《${input.title}》的世界、人物与事件`, focus: [] },
-      actor,
-    )
-    const operations: Operation[] = []
-    documents.forEach((doc, index) => {
-      if (input.materialKind !== 'manuscript') {
-        operations.push({ type: 'document.put', value: doc })
-        return
+    db.exec('BEGIN IMMEDIATE')
+    try {
+      const batches = splitMaterial(input.text)
+      const original: Document = {
+        id: materialId,
+        revisionId: uid(),
+        title: `${input.title}（原始材料）`,
+        text: input.text,
+        materialKind: input.materialKind,
+        materialId,
       }
-      const entity = EntitySchema.parse({
-        id: uid(),
-        kind: 'chapter',
-        name: doc.title,
-        narrativeOrder: index,
-      })
-      operations.push(
-        { type: 'entity.put', value: entity },
-        { type: 'document.put', value: { ...doc, entityId: entity.id } },
+      db.prepare('INSERT OR REPLACE INTO meta VALUES(?,?)').run(
+        'materials',
+        stringify([
+          ...this.materials(db),
+          {
+            id: materialId,
+            title: input.title,
+            kind: input.materialKind,
+            original: input.text,
+            originalRevisionId: original.revisionId,
+            documentIds: [materialId, ...documents.map((d) => d.id)],
+            batches,
+            nextBatch: 0,
+          },
+        ]),
       )
-    })
-    const change = this.propose(
-      db,
-      {
-        baseRevision: this.novel(db).revision,
-        summary:
-          input.materialKind === 'manuscript'
-            ? `接纳 ${documents.length} 个正文片段：${input.title}`
-            : `接纳原始创作材料：${input.title}`,
-        operations: safeJson(operations),
-      },
-      actor,
-    )
-    return {
-      change,
-      task,
-      chapters: input.materialKind === 'manuscript' ? documents.length : 0,
-      materials: documents.length,
-      materialKind: input.materialKind,
-      note: '原文先经作者接受；世界事实需要独立提取与审阅。',
+      const task = this.startTask(
+        db,
+        {
+          kind: 'import',
+          intent: `提取《${input.title}》的世界、人物与事件；材料 ${materialId}`,
+          focus: [],
+        },
+        actor,
+      )
+      const operations: Operation[] = [{ type: 'document.put', value: original }]
+      documents.forEach((doc, index) => {
+        if (input.materialKind !== 'manuscript') {
+          operations.push({ type: 'document.put', value: doc })
+          return
+        }
+        const entity = EntitySchema.parse({
+          id: uid(),
+          kind: 'chapter',
+          name: doc.title,
+          narrativeOrder: index,
+        })
+        operations.push(
+          { type: 'entity.put', value: entity },
+          { type: 'document.put', value: { ...doc, entityId: entity.id } },
+        )
+      })
+      const change = this.propose(
+        db,
+        {
+          baseRevision: this.novel(db).revision,
+          summary:
+            input.materialKind === 'manuscript'
+              ? `接纳 ${documents.length} 个正文片段：${input.title}`
+              : `接纳原始创作材料：${input.title}`,
+          operations: safeJson(operations),
+        },
+        actor,
+      )
+      const materialRecords = this.materials(db)
+      const materialIndex = materialRecords.findIndex((m) => m.id === materialId)
+      materialRecords[materialIndex] = {
+        ...materialRecords[materialIndex],
+        taskId: task.id,
+        initialChangeId: change.id,
+      }
+      db.prepare('INSERT OR REPLACE INTO meta VALUES(?,?)').run(
+        'materials',
+        stringify(materialRecords),
+      )
+      db.exec('COMMIT')
+      return {
+        change,
+        task,
+        materialId,
+        chapters: input.materialKind === 'manuscript' ? documents.length : 0,
+        materials: documents.length,
+        materialKind: input.materialKind,
+        note: '原文先经作者接受；世界事实需要独立提取与审阅。',
+      }
+    } catch (error) {
+      db.exec('ROLLBACK')
+      throw error
     }
   }
   private reindex(db: DatabaseSync) {
@@ -826,7 +1188,15 @@ export class Store {
             (input.time === undefined ||
               (e.time?.start !== undefined && e.time.start <= input.time)),
       )
-      const known = new Set(evidence.map((e) => String(e.attributes.assertion)))
+      const known = new Set(
+        evidence
+          .filter(
+            (e) =>
+              input.perspective === 'reader' ||
+              ['known', 'knows', '已知', '知道'].includes(String(e.attributes.mode)),
+          )
+          .map((e) => String(e.attributes.assertion)),
+      )
       const records = new Set(evidence.map((e) => e.id))
       allowed = valid.filter(
         (e) => known.has(e.id) || e.id === input.perspective || records.has(e.id),
@@ -835,16 +1205,46 @@ export class Store {
     }
     const focus = new Set(input.focus)
     const seeds = new Set(input.focus)
+    for (const e of world.entities)
+      if (
+        e.kind === 'knowledge' &&
+        typeof e.attributes.knower === 'string' &&
+        seeds.has(e.attributes.knower)
+      ) {
+        focus.add(e.id)
+        if (typeof e.attributes.assertion === 'string') focus.add(e.attributes.assertion)
+      }
     for (const r of world.relations)
       if (seeds.has(r.from) || seeds.has(r.to)) {
         focus.add(r.from)
         focus.add(r.to)
       }
-    allowed.sort(
-      (a, b) =>
-        Number(b.kind === 'rule') - Number(a.kind === 'rule') ||
-        Number(focus.has(b.id)) - Number(focus.has(a.id)),
-    )
+    for (let changed = true; changed; ) {
+      changed = false
+      for (const e of world.entities.filter((e) => focus.has(e.id) && e.kind === 'plan')) {
+        const parent = e.attributes.parentId
+        if (typeof parent === 'string' && !focus.has(parent)) {
+          focus.add(parent)
+          changed = true
+        }
+      }
+    }
+    const priority = (e: Entity) =>
+      e.kind === 'rule'
+        ? 10
+        : focus.has(e.id)
+          ? 9
+          : e.kind === 'plan' && e.attributes.status === 'active'
+            ? 8
+            : e.kind === 'foreshadow' && !e.attributes.resolved
+              ? 7
+              : e.kind === 'event'
+                ? 6
+                : ['knowledge', 'storyline', 'arc'].includes(e.kind)
+                  ? 5
+                  : 1
+    const insertion = new Map(world.entities.map((e, i) => [e.id, i]))
+    allowed.sort((a, b) => priority(b) - priority(a) || insertion.get(b.id)! - insertion.get(a.id)!)
     if (input.text)
       allowed = allowed.filter(
         (e) =>
@@ -854,7 +1254,18 @@ export class Store {
     const pack: ContextPack = {
       novelId: world.novel.id,
       revision: world.novel.revision,
-      seed: world.novel.seed,
+      seed:
+        input.perspective === 'author'
+          ? world.novel.seed
+          : {
+              worldRule: '',
+              protagonist: '',
+              desire: '',
+              obstacle: '',
+              stakes: '',
+              centralQuestion: '',
+              notes: '',
+            },
       perspective: input.perspective,
       focus: input.focus,
       time: input.time,
@@ -866,21 +1277,23 @@ export class Store {
       pending: {
         changes: world.changes
           .filter((change) => change.status === 'pending')
-          .map((change) => change.summary),
+          .map((change) => `${change.id}:${change.summary}`),
         tasks: world.tasks
           .filter((task) => !['completed', 'cancelled'].includes(task.status))
-          .map((task) => `${task.kind}:${task.stage}:${task.intent}`),
+          .map((task) => `${task.id}:${task.kind}:${task.stage}:${task.intent}`),
       },
       truncated: false,
+      coverage: { required: [...focus], missing: [] },
     }
     // Reserve envelope and truncation diagnostics, and count every serialized payload component.
     const budget = this.limits.contextChars - 180
     let size = stringify(pack).length
     if (size > budget)
       throw new MythorError('context-budget', '焦点和请求元数据已超过上下文预算，请减少焦点对象')
+    const excerptReserve = Math.min(6000, Math.floor(budget * 0.3))
     for (const e of allowed) {
       const chars = stringify(e).length + 1
-      if (size + chars > budget) {
+      if (size + chars > budget - excerptReserve) {
         pack.truncated = true
         continue
       }
@@ -888,7 +1301,14 @@ export class Store {
       size += chars
     }
     const ids = new Set(pack.entities.map((e) => e.id))
-    for (const r of world.relations)
+    const requiredRelations = world.relations.filter(
+      (r) =>
+        !r.stale &&
+        (seeds.has(r.from) || seeds.has(r.to)) &&
+        (input.time === undefined ||
+          ((r.time?.start ?? -Infinity) <= input.time && (r.time?.end ?? Infinity) >= input.time)),
+    )
+    for (const r of world.relations.filter((r) => !r.stale))
       if (
         ids.has(r.from) &&
         ids.has(r.to) &&
@@ -896,7 +1316,7 @@ export class Store {
           ((r.time?.start ?? -Infinity) <= input.time && (r.time?.end ?? Infinity) >= input.time))
       ) {
         const chars = stringify(r).length + 1
-        if (size + chars > budget) {
+        if (size + chars > budget - excerptReserve) {
           pack.truncated = true
           continue
         }
@@ -905,7 +1325,9 @@ export class Store {
       }
     if (input.perspective === 'author')
       for (const d of world.documents
-        .filter((d) => !input.focus.length || focus.has(d.entityId ?? ''))
+        .filter(
+          (d) => d.id !== d.materialId && (!d.materialKind || d.materialKind === 'manuscript'),
+        )
         .slice(-3)) {
         const excerpt = { documentId: d.id, revisionId: d.revisionId, text: d.text }
         while (stringify(excerpt).length + size + 1 > budget && excerpt.text.length)
@@ -919,6 +1341,34 @@ export class Store {
       }
     if (pack.truncated)
       pack.gaps.push('上下文预算不足，部分对象、规则、关系或正文被截断；请缩小焦点继续检索。')
+    pack.coverage!.missing = [...focus].filter((id) => !ids.has(id))
+    if (input.perspective === 'author') {
+      const selectedRelations = new Set(pack.relations.map((r) => r.id))
+      pack.coverage!.required.push(...requiredRelations.map((r) => r.id))
+      pack.coverage!.missing.push(
+        ...requiredRelations.filter((r) => !selectedRelations.has(r.id)).map((r) => r.id),
+      )
+      const recent = valid.filter((e) => e.kind === 'event').slice(-3)
+      pack.coverage!.required.push(...recent.map((e) => e.id))
+      pack.coverage!.missing.push(...recent.filter((e) => !ids.has(e.id)).map((e) => e.id))
+    }
+    for (const e of allowed.filter(
+      (e) =>
+        e.kind === 'rule' ||
+        (e.kind === 'plan' && (focus.has(e.id) || e.attributes.status === 'active')) ||
+        (e.kind === 'foreshadow' && !e.attributes.resolved && e.attributes.status !== 'resolved'),
+    ))
+      if (!ids.has(e.id)) pack.coverage!.missing.push(e.id)
+    const unsynced = world.documents.filter(
+      (d) => this.meta(db, `document-state:${d.id}`)?.coordinated !== true,
+    )
+    if (unsynced.length) pack.gaps.push(`正文待协调：${unsynced.map((d) => d.id).join(',')}`)
+    if (stringify(pack).length > this.limits.contextChars)
+      throw new MythorError(
+        'context-budget',
+        '关键依据与缺口说明超过预算，暂停写作；请按任务拆分查询',
+        { missingCount: pack.coverage!.missing.length },
+      )
     return pack
   }
   private graph(db: DatabaseSync, p: Record<string, Json>): Json {
@@ -984,9 +1434,10 @@ export class Store {
     try {
       const data = {
         format: 'mythor',
-        version: 2,
+        version: 3,
         novel: this.novel(db),
         tables: Object.fromEntries(TABLES.map((t) => [t, this.all(db, t)])),
+        creative: db.prepare("SELECT id,data FROM meta WHERE id<>'novel'").all(),
       }
       const json = stringify(data)
       return {
@@ -1003,10 +1454,11 @@ export class Store {
     const raw = z
       .object({
         format: z.literal('mythor'),
-        version: z.union([z.literal(1), z.literal(2)]),
+        version: z.union([z.literal(1), z.literal(2), z.literal(3)]),
         project: z.record(z.string(), z.json()).optional(),
         novel: z.record(z.string(), z.json()).optional(),
         tables: z.record(z.string(), z.array(z.record(z.string(), z.json()))),
+        creative: z.array(z.object({ id: z.string(), data: z.string() }).strict()).default([]),
       })
       .parse(JSON.parse(input.text))
     const sourceNovel = raw.version === 1 ? raw.project : raw.novel
@@ -1063,6 +1515,13 @@ export class Store {
     db.exec('BEGIN IMMEDIATE')
     try {
       this.setNovel(db, novel)
+      for (const record of raw.creative) {
+        if (!/^(materials$|session:|document-state:|coordination:|decision:)/.test(record.id))
+          throw new MythorError('invalid-backup', '备份包含未知元数据')
+        z.json().parse(JSON.parse(record.data))
+        if (record.id === 'materials') z.array(MaterialSchema).parse(JSON.parse(record.data))
+        db.prepare('INSERT OR REPLACE INTO meta VALUES(?,?)').run(record.id, record.data)
+      }
       for (const table of TABLES.filter((t) => t !== 'grants'))
         for (const record of data.tables[table]) {
           const value = {
@@ -1070,6 +1529,7 @@ export class Store {
             ...(table === 'tasks'
               ? {
                   sessionId: undefined,
+                  needsRevalidation: raw.version < 3 || (record as WorkflowRun).needsRevalidation,
                   status: ['completed', 'cancelled'].includes((record as WorkflowRun).status)
                     ? (record as WorkflowRun).status
                     : 'pending',

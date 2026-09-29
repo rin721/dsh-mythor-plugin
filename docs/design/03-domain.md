@@ -21,6 +21,7 @@
 | knowledge | knower、assertion、认知方式、获知事件；允许错误信念 |
 | revelation | assertion、正文位置、揭露方式 |
 | rule | 类型、强度、作用域、有效时间、确定性条件或自然语言建议 |
+| plan | intent/premise/plotline/part/arc/chapter/scene/beat；父节点、目标、约束、状态、依据版本、关联对象及实际后果 |
 
 关系具有独立 ID、from、to、kind、说明、有效时间和来源。基础关系包含 participates、located_at、member_of、owns、causes、before、part_of、advances、knows、reveals、foreshadows、conflicts_with 和 related。因果与先后边不能含环；其余环由业务含义决定。多主体事件使用事件节点及参与边。
 
@@ -39,3 +40,5 @@ DocumentRevision 保存正文、对象关联、revisionId 和 parentRevisionId�
 Harness Workspace 管理目录、项目名称和会话归属，不复制成 Mythor 领域聚合。NovelState 管理内部小说身份、作品标题、正式版本、StorySeed 与 active/paused 创作状态。StorySeed 的世界规则、主角、欲望、阻碍、失败代价和核心未知均可缺省；`seed.put` 与其他正式操作一样进入 ChangeSet、校验、审阅、提交和补偿历史。ChangeSet 包含对象、关系、正文或种子操作及预期基线。Commit 保存原操作、逆操作、来源变更集和作者。WorkflowRun 保存类型、阶段、输入、产物、状态及执行会话。Grant 由作者签发，限制任务和操作对象。
 
 不把会话、模型凭据或 Harness Agent 状态复制成领域对象。Repository 提供事务和查询；实体详情、图谱、时间线与上下文都读取同一数据源。
+
+0.3 的阶段产物、九类变化覆盖、材料批次和内部接纳凭据详见 [创作闭环契约](11-creative-loop.md)。人物 knowledge.mode 为 known/knows/已知/知道时才允许读取对应真实断言；误信和未知仅提供认知记录，不能借此读取世界真相。原始材料保留独立身份、类别和不可覆盖的修订；来源偏移以 UTF-16 计算。

@@ -1,5 +1,6 @@
 import { MythorError } from './errors.ts'
 import { STAGES, type Json, type WorkflowRun, type Stage } from '../shared/contracts.ts'
+import { StageArtifacts } from '../shared/creative.ts'
 export function stages(kind: WorkflowRun['kind']): Stage[] {
   if (kind === 'check') return ['read', 'validate', 'review']
   if (kind === 'plan') return ['read', 'goals', 'plan', 'simulate', 'review']
@@ -16,6 +17,8 @@ export function advance(task: WorkflowRun, stage: Stage, artifact: Json): Workfl
   if (['validate', 'review', 'commit'].includes(stage))
     throw new MythorError('stage-owned', '校验、审阅和提交由领域服务推进')
   const sequence = stages(task.kind)
+  if ((task.contractVersion ?? 2) >= 3)
+    StageArtifacts[stage as keyof typeof StageArtifacts].parse(artifact)
   const next = sequence[sequence.indexOf(stage) + 1]
   return {
     ...task,

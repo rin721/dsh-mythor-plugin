@@ -31,4 +31,6 @@ UI：真实浏览器中的表单、审阅、图谱和取消；深浅主题及无
 
 ## 完成定义
 
+0.3 的 `tests/creative-loop.spec.ts` 使用 npm 发布的 Harness Agent Loop、SessionQuery、官方 spawn 和原生问答配合可控 LlmAdapter，不导入相邻 checkout 的测试辅助或内部源码。Schema 必须通过官方子集验证，业务执行仍用 Zod 严格校验。
+
 设计、实现、验证分别列出。发布前运行 typecheck、单元/集成测试、build、打包安装检查与真实 Harness UI smoke。缺少运行环境或凭据时报告具体未验证项，不写「全部通过」。

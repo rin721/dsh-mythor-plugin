@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentRegistry } from '@deepseek-ai/dsh-agent'
 import type { WorkspaceRegistry } from '@deepseek-ai/dsh-workspace'
 import type { Actor, ApiResult, Limits, Request } from '../shared/contracts.ts'
 import { MythorApplication } from './service.ts'
@@ -24,13 +24,22 @@ export class WorkspaceNovels {
     private readonly limits: Partial<Limits>,
     private readonly workerUrl?: URL,
     private readonly legacyRoot?: string,
+    private readonly agents?: AgentRegistry,
   ) {}
 
   async resolve(agent: Agent): Promise<NovelScope> {
     const cwd = agent.session.header.cwd
     if (!cwd) throw new Error('当前会话没有工作目录，请先使用 Harness 工作区选择器选择项目')
     const workspace = await this.registry.resolveByPath(cwd)
-    if (!workspace || !workspace.sessionIds.some((id) => String(id) === String(agent.id)))
+    const root = this.agents
+      ?.roots()
+      .find((owner) => this.agents!.isOwnedBy(agent.id, owner) && owner.session.header.cwd === cwd)
+    if (
+      !workspace ||
+      !workspace.sessionIds.some(
+        (id) => String(id) === String(agent.id) || (root && String(id) === String(root.id)),
+      )
+    )
       throw new Error('当前会话不属于有效的 Harness 工作区，请重新选择项目')
     return {
       path: workspace.path,
@@ -119,12 +128,14 @@ export class WorkspaceNovels {
         },
       }
     const normalized =
-      request.action === 'task.start' || request.action === 'task.resume'
-        ? {
-            ...request,
-            payload: { ...request.payload, sessionId: String(agent.id) },
-          }
-        : request
+      request.action === 'session.save' || request.action === 'session.state'
+        ? { ...request, payload: { ...request.payload, id: String(agent.id) } }
+        : request.action === 'task.start' || request.action === 'task.resume'
+          ? {
+              ...request,
+              payload: { ...request.payload, sessionId: String(agent.id) },
+            }
+          : request
     const result = await application.request(normalized, actor, signal)
     if (
       result.ok &&
@@ -139,6 +150,12 @@ export class WorkspaceNovels {
         'export',
         'backup',
         'legacy.list',
+        'task.list',
+        'task.read',
+        'material.list',
+        'material.read',
+        'session.state',
+        'session.save',
       ].includes(request.action)
     )
       this.notify(scope.path)
@@ -147,10 +164,29 @@ export class WorkspaceNovels {
 
   setFocus(agent: Agent, ids: string[]) {
     this.focus.set(String(agent.id), ids)
+    void this.request(
+      agent,
+      { action: 'session.save', payload: { value: { focus: ids } } },
+      { kind: 'author' },
+    )
   }
 
   getFocus(agent: Agent) {
     return this.focus.get(String(agent.id)) ?? []
+  }
+  async restoreFocus(agent: Agent) {
+    if (this.focus.has(String(agent.id))) return this.getFocus(agent)
+    const result = await this.request(
+      agent,
+      { action: 'session.state', payload: {} },
+      { kind: 'author' },
+    )
+    if (result.ok) {
+      const saved = result.value as { focus?: unknown }
+      if (Array.isArray(saved.focus) && saved.focus.every((id) => typeof id === 'string'))
+        this.focus.set(String(agent.id), saved.focus)
+    }
+    return this.getFocus(agent)
   }
 
   async *watch(agent: Agent, signal: AbortSignal): AsyncIterable<{ generation: number }> {

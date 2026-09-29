@@ -136,7 +136,10 @@ it('assembles the latest enabled novel context through the Agent-scoped system p
     const change = proposed.ok ? (proposed.value as unknown as ChangeSet) : undefined
     await novels.request(
       agent,
-      { action: 'changes.commit', payload: { id: change!.id, idempotencyKey: 'context-test' } },
+      {
+        action: 'changes.commit',
+        payload: { id: change!.id, idempotencyKey: 'context-test', acknowledgeWarnings: true },
+      },
       { kind: 'author' },
     )
     const second = await ctx.systemPrompt.assemble({ agent })
@@ -270,7 +273,10 @@ it('keeps Agent scene proposals outside Canon until author commit and shares the
     expect(checked.ok).toBe(true)
     const committed = await novels.request(
       a1b,
-      { action: 'changes.commit', payload: { id: change!.id, idempotencyKey: 'accepted_scene' } },
+      {
+        action: 'changes.commit',
+        payload: { id: change!.id, idempotencyKey: 'accepted_scene', acknowledgeWarnings: true },
+      },
       { kind: 'author' },
     )
     expect(committed.ok).toBe(true)

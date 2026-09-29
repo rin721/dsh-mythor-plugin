@@ -21,8 +21,22 @@ import {
   type WorkflowRun,
 } from './shared/contracts.ts'
 import { ROLE_GUIDANCE } from './domain/workflows.ts'
+import { CreativeService } from './application/creative.ts'
+import { interviewState, registerInterview } from './application/interview.ts'
+import { CREATIVE_GUIDANCE } from './shared/creative.ts'
+import { registerCreativeTools } from './application/agent-tools.ts'
+import { ToolPayloads } from './shared/tool-schemas.ts'
+import { harnessSchema } from './shared/harness-schema.ts'
+import Subagents from '@deepseek-ai/dsh-subagent'
+import * as Spawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
+import UserQuestions from '@deepseek-ai/dsh-user-questions'
 
 export const name = 'mythor'
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    'mythor-task': { kind: 'mythor-task' }
+  }
+}
 export const inject = ['tools', 'commands', 'typert', 'workspaceRegistry']
 export interface Config {
   /** Retained only as the read-only source for explicit legacy migration. */
@@ -102,6 +116,28 @@ export class MythorRemote extends TypertRemoteService {
         }
       }
     }
+    if (parsed.action === 'changes.commit' && agent.status !== 'running') {
+      const materials = await this.novels.request(
+        agent,
+        { action: 'material.list', payload: {} },
+        { kind: 'author' },
+        signal,
+      )
+      if (materials.ok) {
+        const material = (materials.value as { initialChangeId?: string; taskId?: string }[]).find(
+          (m) => m.initialChangeId === parsed.payload.id,
+        )
+        if (material?.taskId) {
+          const task = await this.novels.request(
+            agent,
+            { action: 'task.read', payload: { id: material.taskId } },
+            { kind: 'author' },
+            signal,
+          )
+          if (task.ok) this.dispatch(agent, WorkflowSchema.parse(task.value))
+        }
+      }
+    }
     return result
   }
   @Remote({ mode: 'stream' })
@@ -112,11 +148,11 @@ export class MythorRemote extends TypertRemoteService {
 
 function taskMessage(task: WorkflowRun) {
   return createUserMessage({
-    source: { kind: 'user' },
+    source: { kind: 'mythor-task' },
     content: [
       {
         type: 'text',
-        text: `执行 Mythor 任务 ${task.id}，小说 ${task.novelId}，基线版本 ${task.baseRevision}。意图：${task.intent}\n当前阶段 ${task.stage}：${ROLE_GUIDANCE[task.stage]}\n已保存产物：${JSON.stringify(task.artifacts)}\n${GENERIC_HELP}`,
+        text: `执行 Mythor 任务 ${task.id}，小说 ${task.novelId}，基线版本 ${task.baseRevision}。意图：${task.intent}\n${task.kind === 'import' ? '使用 mythor_material 按意图中的材料 ID 逐批理解，直到 completed 或 pending/paused；不要使用通用阶段推进伪装完成。' : `当前阶段 ${task.stage}：${ROLE_GUIDANCE[task.stage]}`}\n已保存产物：${JSON.stringify(task.artifacts)}\n${GENERIC_HELP}`,
       },
     ],
   })
@@ -161,6 +197,17 @@ const tools: { name: string; action?: Request['action']; description: string }[]
   },
   { name: 'mythor_history', action: 'history', description: '读取当前小说的不可变提交历史。' },
   {
+    name: 'mythor_tasks',
+    action: 'task.list',
+    description: '读取可恢复创作任务及规划产物，不依赖旧聊天。',
+  },
+  { name: 'mythor_task_read', action: 'task.read', description: '读取指定任务检查点。' },
+  {
+    name: 'mythor_materials',
+    action: 'material.list',
+    description: '读取原始材料分类、批次和恢复检查点。',
+  },
+  {
     name: 'mythor_critique',
     action: 'task.critique',
     description: '保存 Critic 发现；不能代表作者授权。',
@@ -189,7 +236,15 @@ function registerTools(ctx: Context, novels: WorkspaceNovels, remote: MythorRemo
                   enum: ['task.start', 'task.advance', 'task.resume', 'task.cancel'],
                 },
               }),
-          payload: { type: 'object', additionalProperties: true },
+          payload: entry.action
+            ? harnessSchema(ToolPayloads[entry.action as keyof typeof ToolPayloads])
+            : harnessSchema(
+                z.union(
+                  ['task.start', 'task.advance', 'task.resume'].map(
+                    (action) => ToolPayloads[action as keyof typeof ToolPayloads],
+                  ),
+                ),
+              ),
         },
         required: entry.action ? ['payload'] : ['action', 'payload'],
         additionalProperties: false,
@@ -208,13 +263,19 @@ function registerTools(ctx: Context, novels: WorkspaceNovels, remote: MythorRemo
           .parse(args)
         const action = entry.action ?? input.action
         if (!action) throw new Error('缺少任务操作')
+        const payload = ToolPayloads[action as keyof typeof ToolPayloads].parse(input.payload)
         const result = await novels.request(
           exec.agent,
-          { action, payload: input.payload },
+          { action, payload: payload as Record<string, import('./shared/contracts.ts').Json> },
           { kind: 'agent', sessionId: String(exec.agent.id) },
           exec.signal,
         )
-        if (result.ok && action.startsWith('task.')) {
+        if (
+          result.ok &&
+          ['task.start', 'task.advance', 'task.resume', 'task.cancel', 'task.critique'].includes(
+            action,
+          )
+        ) {
           const task = WorkflowSchema.parse(result.value)
           if (action === 'task.cancel') remote.cancel(exec.agent, task)
           return { ...result, instructions: ROLE_GUIDANCE[task.stage] }
@@ -227,11 +288,32 @@ function registerTools(ctx: Context, novels: WorkspaceNovels, remote: MythorRemo
 
 export function installNovelContext(agent: Agent, novels: WorkspaceNovels) {
   return agent.ctx.on('system-prompt/assemble', async (assembly, context, next) => {
+    const projections = agent.ctx.get('sessionProjections')
+    if (projections) {
+      const progress = interviewState(agent.ctx, agent.session)
+      if (progress.intakes.length || progress.decision)
+        assembly.contexts.push({
+          name: 'mythor:interview',
+          text: JSON.stringify({
+            intakes: progress.intakes.slice(-3).map((i) => ({
+              phase: i.phase,
+              fragments: i.fragments.map((f) => ({ ...f, text: f.text.slice(0, 400) })).slice(-6),
+              questions: i.questions,
+              evidence: i.evidence
+                .map((e) => ({ seq: e.seq, quote: e.quote.slice(0, 300) }))
+                .slice(-4),
+            })),
+            decision: progress.decision
+              ? { id: progress.decision.id, hash: progress.decision.hash }
+              : null,
+          }),
+        })
+    }
     const result = await novels.request(
       agent,
       {
         action: 'context',
-        payload: { focus: novels.getFocus(agent), perspective: 'author' },
+        payload: { focus: await novels.restoreFocus(agent), perspective: 'author' },
       },
       { kind: 'agent', sessionId: String(agent.id) },
       context.signal,
@@ -247,17 +329,39 @@ export function installNovelContext(agent: Agent, novels: WorkspaceNovels) {
 }
 
 export function apply(ctx: Context, config: Config): void {
-  const novels = new WorkspaceNovels(ctx.workspaceRegistry, config, undefined, config.dataDirectory)
+  ctx.inject(['sessionProjections'], registerInterview)
+  if (!ctx.get('subagents')) ctx.plugin(Subagents)
+  ctx.inject(['subagents'], (scope) => {
+    if (!scope.subagents.getProvider('spawn')) scope.plugin(Spawn, { providerName: 'spawn' })
+  })
+  if (!ctx.get('userQuestions')) ctx.plugin(UserQuestions)
+  const novels = new WorkspaceNovels(
+    ctx.workspaceRegistry,
+    config,
+    undefined,
+    config.dataDirectory,
+    ctx.agents,
+  )
+  const creative = new CreativeService(ctx, novels)
   const remote = new MythorRemote(ctx, novels)
   const installed = new WeakSet<Agent>()
   const installFor = async (agent: Agent) => {
     if (installed.has(agent)) return
-    if (!(await novels.shouldInstall(agent))) return
+    if (!agent.session.header.cwd) return
+    if (ctx.agents?.list().some((owner) => ctx.agents.isOwnedBy(agent.id, owner))) return
     installed.add(agent)
     const disposers = registerTools(agent.ctx, novels, remote)
+    const guidance = agent.ctx.systemPrompt.section({
+      name: 'mythor:creative-guidance',
+      order: 600,
+      text: CREATIVE_GUIDANCE,
+    })
+    const creativeTools = registerCreativeTools(agent, creative)
     const disposeContext = installNovelContext(agent, novels)
     agent.ctx.effect(() => () => {
       disposeContext()
+      guidance()
+      creativeTools.forEach((dispose) => dispose())
       disposers.forEach((dispose) => dispose())
     })
   }
@@ -268,6 +372,7 @@ export function apply(ctx: Context, config: Config): void {
     return undefined
   })
   ctx.on('agent/error', ({ agent, error }) => void remote.failed(agent, error))
+  for (const agent of ctx.agents?.roots() ?? []) void installFor(agent)
   ctx.effect(() => () => novels.close())
   // register() already owns a Cordis effect. Register it directly so the
   // strict Host descriptor stays present for the lifetime of this plugin;

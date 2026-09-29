@@ -6,15 +6,16 @@
 
 要求 Node.js 24+，DeepSeek Harness **0.1.7-rc.2**。其他 Harness 版本需要先运行兼容验证。
 
-从 Harness 仓库根目录执行以下 PowerShell 命令。插件会以本地目录依赖安装到 Web profile，因此 clone 路径需要保持可用；修改插件代码后重新构建并重启现有 Host。
+从 Harness 仓库根目录执行以下 PowerShell 命令。先 clone、安装依赖并构建，再打包成**本地文件**安装；修改代码后重新打包安装并重启 Host。
 
 ```powershell
 git clone https://github.com/rin721/dsh-mythor-plugin.git ..\dsh-mythor-plugin
 Push-Location ..\dsh-mythor-plugin
 pnpm install --frozen-lockfile
 pnpm build
+pnpm pack
 Pop-Location
-pnpm dsh plugin --profile web add ..\dsh-mythor-plugin
+pnpm dsh plugin --profile web add ..\dsh-mythor-plugin\dsh-mythor-plugin-0.3.0.tgz
 pnpm dsh web
 ```
 
@@ -23,36 +24,34 @@ pnpm dsh web
 维护者发布新版本时，先将 `package.json` 的版本号更新并提交，再创建匹配的版本标签并推送：
 
 ```powershell
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.3.0
+git push origin v0.3.0
 ```
 
-GitHub Actions 会检查标签与 package 版本一致，运行检查和测试，构建 `.tgz` 并将其附加到 GitHub Release。仓库需允许 Actions 使用 `GITHUB_TOKEN` 写入 Releases（Settings → Actions → General → Workflow permissions）。发布后，用户按上面的源码安装步骤 clone 对应版本并从本地目录安装；不要将 Release tarball URL 作为 pnpm 依赖。
+GitHub Actions 会检查标签与 package 版本一致，运行检查和测试，构建 `.tgz` 并将其附加到 GitHub Release。仓库需允许 Actions 使用 `GITHUB_TOKEN` 写入 Releases（Settings → Actions → General → Workflow permissions）。发布后，用户按上面的源码安装步骤 clone 对应版本并安装本地构建的包；不要将 Release tarball URL 作为 pnpm 依赖。Windows 的 pnpm 目录 link 可能生成无效盘符 junction，因此安装示例使用本地 `.tgz`。
 
-在 Harness 创建或选择一个工作区，开始会话后打开“对话 / 轨迹”旁的 **Mythor** 视图。每个 Harness 工作区承载一部小说；首次明确启用后，同工作区会话自动共享人物、正文、关系、规则、候选与历史。
+在 Harness 创建或选择一个工作区，直接在对话里表达想法即可。普通讨论和探索不建小说库；明确继续创作后自动建立最小状态，无需作品标题或启用命令。同工作区会话共享小说；“对话 / 轨迹”旁的 **Mythor** 用于查看和修订。
 
 ## 创作与对话
 
 在 Harness 对话中输入：
 
 ```text
-/mythor enable 作品标题
-/mythor focus <人物或场景 ID>
-/mythor write 林烬在废弃车站取得地图，但顾清开始怀疑他的身份
-/mythor review
-/mythor commit <变更集 ID>
+我只想到天空中有一座倒悬的城市，其他还没想好。
+我希望主角起初不相信别人，后来慢慢愿意相信。
+沿这个方向继续，先写他第一次进入城市。
 ```
 
 `plan`、`revise`、`check` 创建对应阶段任务；`resume <任务 ID>` 恢复，`cancel <任务 ID>` 停止领域任务；`history` 查看正式提交。小说作用域由当前 Harness 会话的工作目录与 WorkspaceRegistry 自动确定，不接受手输项目 ID 或数据库路径。
 
-模型默认只能创建候选。作者可在「创作任务」页为指定对象授予 24 小时任务授权；范围以外或有未处理检查结果的修改仍需审阅。授权不替代 Harness 自身的工具审批。
+模型只能提交候选与证据。符合已定方向的正文及明确变化经 Host 提取、检查、版本校验后一起自动接纳；重要方向、推断升级及历史矛盾通过 Harness 原生问答聚合确认。工作台的旧任务授权保留兼容用途，不能替代事实/正文协调，也不替代 Harness 工具审批。CLI enable/focus/review 等是高级兼容入口，不是新手前置步骤。
 
 ## 数据与交换
 
 小说数据保存在当前工作区的 `.mythor/novel.sqlite`；`.mythor/.gitignore` 默认避免数据库、临时文件和材料进入 Git。删除 Harness 的工作区登记不会删除小说数据，重新登记同一目录仍可读取。`dataDirectory` 仅用于发现并显式迁入 0.1.x 旧数据。
 
 - 导入 Markdown/TXT 可标记为正文、大纲、人物设定、世界观或笔记；原始材料先生成候选，不自动认定小说世界事实。后续提取任务负责人物、事件和状态整理。
-- 导出正文为 Markdown；v2 备份包含完整 JSON 数据及版本，恢复只允许进入没有创作内容的 Harness 工作区，并可读取 v1 备份。
+- 导出正文为 Markdown，原始材料与参考笔记不会混入；v3 备份包含来源、批次及会话草稿元数据，恢复只允许进入没有创作内容的 Harness 工作区，并可读取 v1/v2 备份。v2 数据库升级前保留一致备份。
 - 草稿、计划、假设与已接受事实分开；人物知识、读者揭露与世界时间独立。
 - 图谱提供局部展开、聚焦、路径追踪及关系编辑；编辑进入同一审阅流程。
 

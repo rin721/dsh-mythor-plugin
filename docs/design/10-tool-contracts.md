@@ -8,11 +8,18 @@ Remote 接收 `{action,payload}`，通过 Typert Agent scope 自动携带当前 
 
 | 工具 | payload 主要字段 | 结果 |
 | --- | --- | --- |
-| mythor_projects | 无 | 项目目录 |
 | mythor_query | text、kind、limit、offset | items、total、nextOffset |
 | mythor_context | focus[]、perspective、time、narrativeOrder、text | 带版本、来源、缺口和截断的 ContextPack |
 | mythor_graph | focus、depth、kinds[]、time、limit | nodes、edges、visits、lanes、intersections |
 | mythor_document | id 或 revisionId | 当前正文或不可变旧修订 |
+| mythor_intake | phase、evidence(seq/quote)、fragments、questions≤2、reason | 探索事件或渐进初始化 |
+| mythor_develop | intent、evidence | 人物变化及正式分层规划候选/安全近期规划 |
+| mythor_scene | planId、perspective、intent、documentId?、time?、narrativeOrder? | 推演、隔离写作、提取、检查及联合接纳/待决定 |
+| mythor_decide | id（候选） | 与基线及操作绑定的原生问答 |
+| mythor_retcon | entityId、intent | 来源、影响对象及修复路线；不覆盖事实 |
+| mythor_import | title?、text、materialKind?、evidence | 对话原文迁入；文件走工作台上传 |
+| mythor_material / mythor_materials | id / 空 payload | 分批理解/精简材料索引 |
+| mythor_tasks / mythor_task_read | 空 payload / id | 恢复任务索引及阶段产物 |
 | mythor_task | start: kind/intent/focus；advance: id/stage/artifact；resume/cancel: id | WorkflowRun 与下一阶段提示 |
 | mythor_propose | baseRevision、summary、operations[]、taskId? | 待审阅 ChangeSet |
 | mythor_critique | id（任务）、findings[] | 保存语义建议的 WorkflowRun |

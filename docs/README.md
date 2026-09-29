@@ -19,5 +19,7 @@
 | 13 | [Harness UI 技术决策](adr/0002-harness-ui.md) | 公开组件、Radix 补充、共享模块与样式生命周期 |
 | 14 | [Harness Workspace 作用域](adr/0003-harness-workspace-scope.md) | 唯一项目边界、原生视图、存储与旧数据迁移 |
 | 15 | [小说创作能力目标核验](implementation/goal-validation.md) | 运行环境边界、闭环证据与未完成能力 |
+| 16 | [创作闭环契约](design/11-creative-loop.md) | 0.3 渐进进入、分层规划、场景协调、策略和恢复 |
+| 17 | [创作协调决策](adr/0004-creative-coordination.md) | 官方子 Agent、内部接纳身份与 Schema 适配 |
 
 文档使用「设计」「实现」「验证」三种独立状态：设计内容不代表功能已经交付。每次改变领域语义、公共契约或流程，同步修改负责该概念的文档及追溯项；其他文档引用它，不复制另一份定义。原始 goal.md 保持不变。

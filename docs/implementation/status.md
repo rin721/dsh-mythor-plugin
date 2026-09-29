@@ -1,6 +1,33 @@
 # 实施与验证记录
 
-记录日期：2026-09-29。当前交付版本：0.2.0。本文只记录已实现能力、本轮实际证据和未验证边界；`docs/goal.md` 保持原样。
+记录日期：2026-09-29。当前开发版本：0.3.0。本文只记录已实现能力、本轮实际证据和未验证边界；`docs/goal.md` 保持原样。下方 0.2.0 内容为历史交付记录。
+
+## 0.3.0 创作闭环实施
+
+本轮接入渐进意图、普通语言结构翻译、分层规划、原生作者问答、受限写作、九类变化提取、独立检查和内部接纳策略。数据仍由工作区 SQLite Worker 维护，模型仍由 Harness Agent Loop 和官方 spawn Provider 执行。普通讨论/探索只写 Session 全量访谈事件及原生投影，不创建 `.mythor`；持续意图经核验后自动建立暂定标题。
+
+已实现路径见 [创作闭环设计](../design/11-creative-loop.md)、`src/application/creative.ts`、`src/application/interview.ts` 与 `tests/creative-loop.spec.ts`。接口完整发布 Harness 支持的 JSON Schema，执行及结构化输出继续严格 Zod 校验。Host 策略凭据绑定候选基线和操作哈希；模型不能提供策略身份，旧授权不能绕过正文/事实协调。原生问答绑定具体候选，自由文本不自动批准。
+
+### 本轮实际证据
+
+- Windows / Node 24.11.1 / pnpm 10.22.0；依赖固定为 npm 发布的 Harness 0.1.7-rc.2，无相邻 checkout 源码作为发布依赖。
+- `pnpm typecheck`、`pnpm test`（42 项 Node + 10 项 jsdom UI + UI 静态边界）、`pnpm check:docs`（20 个 Markdown）、`pnpm format:check`、生产构建通过。
+- 真实 Harness Loop 可控模型用例：普通小说讨论不建库；单画面探索无需标题或专业字段；持续创作初始化；重要规划两次原生问答；十次低风险正文无需逐章批准；关闭 SQLite Worker，换同工作区新会话写第十一章。该章明确事件与正文共同提交，下一次 ContextPack 包含事件。
+- 同一真实 Loop 用例：原始参考笔记多批（每批 ≤12,000 字符）提取与独立复核；批次检查点推进；重复执行不重复接纳；笔记不混入正文导出。此用例的材料提取结果为无领域变化，不代表复杂小说自动提取质量已验证。
+- 存储/边界回归：同项目共享与跨项目隔离、版本冲突、哈希凭据拒绝、旧库一致备份升级、v1/v2 备份读取、历史修订、来源失效、任务恢复、草稿合并。人物误信不提供真实断言；死亡人物新行动和同时间物品持有冲突有证据化检查。
+- 干净本地 clone 后覆盖本轮未提交源码，`pnpm install --frozen-lockfile` 和 `pnpm build` 成功。不是已发布 GitHub 分支的验收。
+- `pnpm pack --pack-destination .test-output` 生成 0.3.0 本地包，Harness CLI 在独立 `mythor-verification` profile 安装成功。安装提示缺失宿主 peer 依赖；包安装成功不等于真实 Web 运行验收。
+- 本地目录 add 实测失败：pnpm 生成 `profile\\D:\\...` 无效 junction，Harness 无法解析 bundle；README 改为 clone → install → build → pack → 本地 tgz add，未修改 Harness 内核。
+- 一次与安装并行的测试运行出现 `ERR_IPC_CHANNEL_CLOSED`；随后独立重跑成功。官方 UI 发布包缺少 `index.js.map` 的 sourcemap 警告仍存在，不影响已通过测试。
+- 50章正文和50项密集规则的存储压力夹具触发明确的 `context-budget` 暂停；这是预算失效防护证据，不能计为50章真实 Agent 连续创作验收。
+- 从 tarball 切到错误目录 junction 后，再安装 tarball 曾报 `ERR_PNPM_EPERM`；隔离 profile 的坏链接影响包替换，不归因于领域事务，未修改用户现有 Web profile。
+- 最终源码重新打包后，在全新 `mythor-030-package-check` profile 再次执行本地 tgz add 成功（退出码0）；依然有宿主 peer 提示，未将其描述为真实 Web smoke。
+
+### 尚未完成的验收与边界
+
+不能将可控模型响应计为文学理解、合理推演或长篇创作质量达标。当前没有完成真实 Harness Web 的 0.3.0 十页/主题/布局检查，完整关闭 Harness 进程后恢复访谈、50章密集资料的关键覆盖压力测试、全部九类状态变化的多场景连续创作、复杂 Retcon 后文逐章修复、混合已有小说的别名/矛盾问答，以及 Linux/macOS 验证。
+
+Retcon 已提供影响证据和修复路线，后续修复由根 Agent 在作者决定后使用规划与协调工具推进，不是独立自动重写所有后文的执行器。关键上下文预算不足目前安全暂停并提示缩小范围；没有宣称自动多轮补检索已完成。翻译生成的新人物设定保守保持假设，需要后续作者决定/来源提取成为事实。完整计划仍需这些针对性验收，不标记“全部完成”。
 
 ## 0.2.0 交付状态
 

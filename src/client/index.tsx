@@ -1,9 +1,8 @@
-import React, { useEffect, useState } from 'react'
+import React from 'react'
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 import type { ApiResult, Request } from '../shared/contracts.ts'
 import { remoteContribution } from '../shared/remote.ts'
 import { App, type Api } from './App.tsx'
-import { Button, ErrorState, Field, FormActions, Input, Modal } from './ui/index.tsx'
 import { en, zh, type Key } from './locales.ts'
 
 interface ScopedClientContext {
@@ -49,100 +48,33 @@ function servicesFor(ctx: ClientContext, sessionId: string) {
   const subscribe = (listener: () => void) => {
     const controller = new AbortController()
     void (async () => {
-      let first = true
-      try {
-        for await (const _frame of remote.watch(controller.signal)) {
-          if (first) first = false
-          else listener()
+      let delay = 500
+      while (!controller.signal.aborted) {
+        try {
+          listener()
+          for await (const _frame of remote.watch(controller.signal)) {
+            listener()
+            delay = 500
+          }
+        } catch {
+          if (!controller.signal.aborted) listener()
         }
-      } catch {
-        if (!controller.signal.aborted) listener()
+        if (!controller.signal.aborted)
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(done, delay)
+            function done() {
+              clearTimeout(timer)
+              controller.signal.removeEventListener('abort', done)
+              resolve()
+            }
+            controller.signal.addEventListener('abort', done, { once: true })
+          })
+        delay = Math.min(delay * 2, 10000)
       }
     })()
     return () => controller.abort()
   }
   return { api, subscribe }
-}
-
-export function EnableControl({
-  api,
-  session,
-  locked = false,
-}: {
-  api: Api
-  session: { blank: boolean }
-  locked?: boolean
-}) {
-  const [enabled, setEnabled] = useState<boolean>()
-  const [open, setOpen] = useState(false)
-  const [title, setTitle] = useState('')
-  const [error, setError] = useState('')
-  useEffect(() => {
-    void api({ action: 'novel.status', payload: {} }).then((result) => {
-      if (result.ok) {
-        setEnabled(Boolean((result.value as { enabled?: boolean }).enabled))
-        setError('')
-      } else {
-        setEnabled(undefined)
-      }
-    })
-  }, [api])
-  if (!session.blank || enabled !== false) return null
-  return (
-    <>
-      <Button disabled={locked} onClick={() => setOpen(true)}>
-        Mythor
-      </Button>
-      {open && (
-        <Modal
-          title="为当前 Harness 项目启用 Mythor"
-          closeLabel="关闭"
-          close={() => {
-            setOpen(false)
-            setError('')
-          }}
-        >
-          {error && <ErrorState>{error}</ErrorState>}
-          <Field>
-            作品标题
-            <Input
-              data-modal-autofocus
-              value={title}
-              onChange={(event) => setTitle(event.target.value)}
-              placeholder="作品标题"
-            />
-          </Field>
-          <FormActions>
-            <Button
-              onClick={() => {
-                setOpen(false)
-                setError('')
-              }}
-            >
-              取消
-            </Button>
-            <Button
-              variant="primary"
-              disabled={!title.trim()}
-              onClick={() => {
-                setError('')
-                void api({ action: 'novel.enable', payload: { title: title.trim() } }).then(
-                  (result) => {
-                    if (result.ok) {
-                      setEnabled(true)
-                      setOpen(false)
-                    } else setError(result.error.message)
-                  },
-                )
-              }}
-            >
-              启用
-            </Button>
-          </FormActions>
-        </Modal>
-      )}
-    </>
-  )
 }
 
 export const inject = ['slots', 'locale', 'remote', 'sessions']
@@ -179,18 +111,6 @@ export function apply(ctx: ClientContext) {
               startConversation={(text) => inputActions.setDraft(text)}
             />
           ),
-        ),
-      )
-      scope.slots.inject('conversation.input.left', () =>
-        scope.slots.register(
-          {
-            name: 'conversation.input.left',
-            id: 'mythor-enable',
-            order: 30,
-            locale: 'mythor',
-            inject: (sessionId: string) => ({ api: servicesFor(scope, sessionId).api }),
-          },
-          EnableControl,
         ),
       )
     })

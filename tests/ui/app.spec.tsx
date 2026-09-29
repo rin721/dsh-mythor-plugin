@@ -73,6 +73,8 @@ it('keeps an edited entity and reports version conflicts inside its host modal',
           details: { currentRevision: 4 },
         },
       }
+    if (request.action === 'session.state' || request.action === 'session.save')
+      return { ok: true as const, value: {} }
     throw new Error(`Unexpected request: ${request.action}`)
   })
   render(<App api={api} />)

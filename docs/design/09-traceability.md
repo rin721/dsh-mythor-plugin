@@ -20,3 +20,5 @@
 | M16 | 从想法或材料开始 | StorySeed / SourceRef / import task | 对话引导、启用入口、迁入审阅 | 不完整种子可保存候选；材料与推断分开确认；旧数据只显式迁移 |
 
 覆盖状态及执行命令只记录在 implementation/status.md；本表描述必须成立的行为，不代表已验证。
+
+0.3 增加 M17 普通语言与渐进进入（intake/develop）、M18 分层规划消费（plan/scene）、M19 正文状态联合接纳（九类提取/Host policy）、M20 防漂移与 Retcon（continuity/语义复核/依赖分析）、M21 既有材料恢复（独立来源/批次）、M22 宿主隔离写作（官方 spawn/原生问答/完整工具 Schema）。契约见 [11-creative-loop.md](11-creative-loop.md)，真实证据及未验证项见实施记录。
