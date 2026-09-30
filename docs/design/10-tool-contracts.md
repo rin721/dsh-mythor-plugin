@@ -68,3 +68,9 @@ agent-unavailable：任务已保存，修复宿主模型配置后恢复。storag
 新增对象先更新领域文档和 EntitySchema；新增关系先定义两端语义、时间和来源，再扩展校验与投影。新增工具只做适配，不再写一套提交逻辑。新增规则采用有界 evaluator，配套正常、冲突、未知测试。新增阶段需同步 stages、ROLE_GUIDANCE、WorkflowSchema、恢复测试和任务 UI。新索引必须能从 Canon 重建。
 
 SQLite schema 1 是首个发布格式；当前拒绝更高版本，尚无历史发布版本迁移承诺。将来每次迁移必须增加前版本备份 fixture 与中断恢复验证，不可仅提高 PRAGMA user_version。
+
+## 工作台与创作记录新增契约
+
+`{action:'workspace.progress',payload:{}}` 由 Remote 的 Host 作用域解析，返回 workspace、enabled、revision、records、checkpoints、plans、tasks、pending、decisions、recent、runtime、totalRecords、truncated、unavailableSessions。每个记录保留完整来源和性质。最多展示最近 80 条；truncated 明示不完整，不能把展示截断当作完整记忆。原始来源继续可按公开 SessionQuery 查询。
+
+`mythor_intake` 增加 answeredQuestionIds（最多两个）以关闭当前问题；只有真实用户来源的 intake 能改变探索。`mythor_decide` 可附 evidence，但模糊自然语言确认不能签发授权；否则继续使用原生问答。`creative.put/delete` 是内部来源记录操作，不开放任意作者/模型提交。所有请求仍拒绝外部 projectId、路径和伪造策略身份。

@@ -46,3 +46,13 @@ Harness storage-domain 当前仅提供单记录原子修改，且读取整域；
 ## 扩展点
 
 RuleEvaluator、RetrievalProvider、ImportAdapter、WorkflowDefinition 和 GraphView 均以明确输入输出扩展。新对象类型必须更新领域 schema、关系约束、UI 字典和测试；不允许第三方 UI 悄悄建立独立事实表。向量与外部知识是可重建索引，不能作为 Canon 唯一来源。
+
+## 创作进展只读模型
+
+`ProgressService` 按唯一工作区作用域组合活动 Harness Session 的快照与已关闭 Session 的公开 SessionQuery 中的结构化创作事件、SQLite 中的创作记录/规划/正文/候选/任务/提交及当前 Agent 运行状态。`workspace.progress` 不调用模型，不创建数据库，不持久化响应。领域部分在 Store 读取事务中取得一致快照；会话运行状态单独列出，不能宣称两者是原子快照。
+
+Host 在每次 system-prompt/assemble 读取相同项目进展；已存在根 Agent 由插件加载补装。需要项目记忆却读不到时明确标记缺口，不能声称恢复了全部方向。Agent 创建与服务访问依赖显式注入 agents。
+
+领域写入、结构化探索追加及 agent/status 使 watch 失效；只读请求与会话编辑保存不发小说失效通知。Client 合并连续通知，重连回读，作用域切换丢弃旧返回，卸载取消订阅。背景读取不清空错误详情或重挂载页面。
+
+项目成员会话某条历史日志不可读时，投影标记 `unavailableSessions` 并保留其他已读记录；不能伪称完整。迁入正式库会暂停，避免丢弃来源。当前活动会话不可读仍直接失败。

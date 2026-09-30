@@ -66,6 +66,20 @@ export class WorkspaceNovels {
     })
   }
 
+  activeSession(id: Agent['id']) {
+    return this.agents?.get(id)?.session
+  }
+
+  async memberSessions(agent: Agent) {
+    const scope = await this.resolve(agent)
+    const workspace = await this.registry.resolveByPath(scope.path)
+    return workspace!.sessionIds
+  }
+
+  async matchesWorkspace(scope: NovelScope, cwd: string) {
+    return String((await this.registry.resolveByPath(cwd))?.id) === scope.workspaceId
+  }
+
   private databasePath(scope: NovelScope) {
     return join(scope.path, '.mythor', 'novel.sqlite')
   }
@@ -141,6 +155,7 @@ export class WorkspaceNovels {
       result.ok &&
       ![
         'novel.status',
+        'workspace.progress',
         'snapshot',
         'query',
         'context',
@@ -220,6 +235,11 @@ export class WorkspaceNovels {
 
   private notify(path: string) {
     for (const listener of this.listeners.get(path) ?? []) listener()
+  }
+
+  async invalidate(agent: Agent) {
+    const scope = await this.resolve(agent)
+    this.notify(scope.path)
   }
 
   private legacyList(): { id: string; name: string; revision: number; archived: boolean }[] {

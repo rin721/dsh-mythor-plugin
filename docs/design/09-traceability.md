@@ -22,3 +22,12 @@
 覆盖状态及执行命令只记录在 implementation/status.md；本表描述必须成立的行为，不代表已验证。
 
 0.3 增加 M17 普通语言与渐进进入（intake/develop）、M18 分层规划消费（plan/scene）、M19 正文状态联合接纳（九类提取/Host policy）、M20 防漂移与 Retcon（continuity/语义复核/依赖分析）、M21 既有材料恢复（独立来源/批次）、M22 宿主隔离写作（官方 spawn/原生问答/完整工具 Schema）。契约见 [11-creative-loop.md](11-creative-loop.md)，真实证据及未验证项见实施记录。
+
+## 持续创作工作台追溯
+
+| 目标 | 实现入口 | 验证 |
+| --- | --- | --- |
+| 同项目跨会话探索 | ProgressService / memberSessions / saveExploration | creative-loop.spec.ts：尚未建库第二根会话回读并回答，随后迁入项目库 |
+| 作者决定与事实分离 | CreativeService.decide / CreativeRecord / informationStatus | 真实 Loop：偏好和片段确认拒绝，明确确认提交后仍为 hypothesis |
+| 投影可重建且只读 | workspace.progress / Store read transaction | store.spec.ts：读取不改变修订，假设备份及补偿 |
+| 三视角同一 Composer | CreativeWorkspace / App / conversation.view | ui/app.spec.tsx：无启用门槛，失败插入保留，版本冲突保留输入 |

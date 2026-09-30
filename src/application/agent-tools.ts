@@ -7,6 +7,7 @@ import {
   IntakeInputSchema,
   SceneRequestSchema,
   MaterialIntakeSchema,
+  DecisionInputSchema,
 } from '../shared/creative.ts'
 import { harnessObjectSchema } from '../shared/harness-schema.ts'
 
@@ -46,9 +47,12 @@ export function registerCreativeTools(agent: Agent, creative: CreativeService) {
     },
     {
       name: 'mythor_decide',
-      schema: id,
-      description: '对具体候选、基线及影响通过 Harness 原生问答取得作者决定。',
-      execute: (p: unknown, s: AbortSignal) => creative.decide(agent, id.parse(p).id, s),
+      schema: DecisionInputSchema,
+      description: '对具体候选、基线及影响取得作者决定；可提供完整真实确认原话，歧义仍需原生问答。',
+      execute: (p: unknown, s: AbortSignal) => {
+        const value = DecisionInputSchema.parse(p)
+        return creative.decide(agent, value.id, s, value.evidence)
+      },
     },
     {
       name: 'mythor_material',

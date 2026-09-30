@@ -8,6 +8,6 @@
 
 Harness 0.1.7-rc.2 的 JSON Schema 子集不接受 Zod 直接生成的 schema。统一转换为官方支持的 type/oneOf/properties/required/additionalProperties/items/enum/const；长度、数值和跨字段限制继续由原始 Zod 在执行时严格校验。输出同样验证，不把类型断言当成服务兼容性。
 
-规划作为领域 Entity 进入 Canon 存储；访谈复用公开 Session 事件；UI 草稿和材料检查点存放工作区领域元数据。备份升级为 v3，避免恢复时丢失这类长期创作信息。
+规划作为领域 Entity 进入项目存储，但提交并不让规划成为已发生的 Canon 事实；访谈复用公开 Session 事件；UI 草稿和材料检查点存放工作区领域元数据。备份升级为 v3，避免恢复时丢失这类长期创作信息。
 
 取舍：Writer 权限极窄，宁可暂停缺失依据，也不允许自行读取全部真相；Retcon 先分析而非静默覆盖。确定性校验不能证明文学合理性，语义结果允许 unknown；控制模型测试不计为真实模型质量验收。

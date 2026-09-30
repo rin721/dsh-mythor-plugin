@@ -51,6 +51,26 @@ it('keeps an edited entity and reports version conflicts inside its host modal',
   const api = vi.fn(async (request: Request): Promise<ApiResult> => {
     if (request.action === 'novel.status')
       return { ok: true, value: encode({ enabled: true, novel }) }
+    if (request.action === 'workspace.progress')
+      return {
+        ok: true,
+        value: encode({
+          workspace: { id: 'workspace', title: '测试' },
+          enabled: true,
+          revision: 3,
+          title: novel.title,
+          records: [],
+          checkpoints: [],
+          plans: [],
+          tasks: [],
+          pending: [],
+          decisions: [],
+          recent: [],
+          runtime: { sessionId: 's1', status: 'idle' },
+          totalRecords: 0,
+          truncated: false,
+        }),
+      }
     if (request.action === 'snapshot')
       return {
         ok: true,
@@ -79,18 +99,62 @@ it('keeps an edited entity and reports version conflicts inside its host modal',
   })
   render(<App api={api} />)
   const user = userEvent.setup()
-  await user.click(await screen.findByRole('button', { name: '世界与人物' }))
+  await user.click(await screen.findByRole('button', { name: '故事资料' }))
   await user.click(await screen.findByRole('button', { name: /林烬/ }))
+  await user.click(screen.getByRole('button', { name: '结构化编辑' }))
   await user.click(screen.getByRole('button', { name: '编辑' }))
   const dialog = screen.getByRole('dialog', { name: '编辑' })
   const name = within(dialog).getByRole('textbox', { name: '名称' })
   await user.clear(name)
   await user.type(name, '林烬的新名字')
   await user.click(within(dialog).getByRole('button', { name: '保存为待审阅变更' }))
-  expect((await within(dialog).findByRole('alert')).textContent).toContain('revision-conflict')
+  expect((await within(dialog).findByRole('alert')).textContent).toContain('故事已经更新')
   expect((name as HTMLInputElement).value).toBe('林烬的新名字')
   const proposal = api.mock.calls.find(([request]) => request.action === 'changes.propose')?.[0]
   expect('projectId' in (proposal ?? {})).toBe(false)
   expect(proposal?.payload.baseRevision).toBe(3)
   expect(api.mock.calls.some(([request]) => request.action === 'changes.commit')).toBe(false)
+})
+
+it('uses the same creative skeleton before initialization and retains failed composer insertion', async () => {
+  const progress = {
+    workspace: { id: 'workspace', title: '测试' },
+    enabled: false,
+    revision: null,
+    title: null,
+    records: [],
+    checkpoints: [],
+    plans: [],
+    tasks: [],
+    pending: [],
+    decisions: [],
+    recent: [],
+    runtime: { sessionId: 's1', status: 'idle' },
+    totalRecords: 0,
+    truncated: false,
+  }
+  const api = vi.fn(
+    async (request: Request): Promise<ApiResult> => ({
+      ok: true,
+      value:
+        request.action === 'novel.status'
+          ? { enabled: false }
+          : JSON.parse(JSON.stringify(progress)),
+    }),
+  )
+  const insert = vi.fn(() => false)
+  render(<App api={api} startConversation={insert} />)
+  await screen.findByText('把你想到的故事告诉我')
+  expect(screen.queryByRole('button', { name: '启用 Mythor' })).toBeNull()
+  expect(screen.getByRole('button', { name: '正文' })).toBeTruthy()
+  expect(screen.getByRole('button', { name: '故事资料' })).toBeTruthy()
+  const user = userEvent.setup()
+  await user.click(screen.getByRole('button', { name: '我脑海里有一个画面：' }))
+  expect(insert).toHaveBeenCalledWith('我脑海里有一个画面：')
+  expect(await screen.findByText('输入框暂时无法插入，这段内容已保留：')).toBeTruthy()
+  expect(
+    api.mock.calls.every(
+      ([r]) => !['novel.enable', 'changes.propose', 'changes.commit'].includes(r.action),
+    ),
+  ).toBe(true)
 })

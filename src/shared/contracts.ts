@@ -62,6 +62,7 @@ export const RelationSchema = z
     time: WorldTime.optional(),
     sources: z.array(Source).default([]),
     revision: z.number().int().nonnegative().default(0),
+    informationStatus: z.enum(['fact', 'plan', 'hypothesis']).optional(),
     stale: z.boolean().optional(),
   })
   .strict()
@@ -88,7 +89,34 @@ export const StorySeedSchema = z
     notes: z.string().max(100_000).default(''),
   })
   .strict()
+export const AuthorMessageRefSchema = z
+  .object({
+    sessionId: Id,
+    seq: z.number().int().nonnegative(),
+    quote: z.string().min(1),
+  })
+  .strict()
+export const CreativeRecordSchema = z
+  .object({
+    id: Id,
+    kind: z.enum([
+      'expression',
+      'preference',
+      'interpretation',
+      'proposal',
+      'hypothesis',
+      'question',
+      'decision',
+    ]),
+    text: z.string().min(1),
+    status: z.enum(['open', 'resolved', 'superseded']).default('open'),
+    sources: z.array(AuthorMessageRefSchema).min(1),
+  })
+  .strict()
+export type CreativeRecord = z.infer<typeof CreativeRecordSchema>
 export const OperationSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('creative.put'), value: CreativeRecordSchema }).strict(),
+  z.object({ type: z.literal('creative.delete'), id: Id }).strict(),
   z.object({ type: z.literal('entity.put'), value: EntitySchema }).strict(),
   z.object({ type: z.literal('entity.delete'), id: Id }).strict(),
   z.object({ type: z.literal('relation.put'), value: RelationSchema }).strict(),
@@ -215,6 +243,7 @@ export const CommitSchema = z
   })
   .strict()
 export interface Snapshot {
+  creativeRecords?: CreativeRecord[]
   novel: NovelState
   entities: Entity[]
   relations: Relation[]
@@ -237,6 +266,7 @@ export type Actor =
   | { kind: 'agent'; sessionId: string }
   | { kind: 'policy'; changeHash: string; reason: string }
 export const ACTIONS = [
+  'workspace.progress',
   'novel.status',
   'novel.enable',
   'novel.update',

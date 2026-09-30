@@ -21,6 +21,7 @@ import type { WorkspaceRegistry } from '@deepseek-ai/dsh-workspace'
 import { mkdtempSync, rmSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { ProgressService } from '../src/application/progress.ts'
 import { CreativeService } from '../src/application/creative.ts'
 import { registerInterview } from '../src/application/interview.ts'
 import { WorkspaceNovels } from '../src/application/workspaces.ts'
@@ -30,6 +31,11 @@ import { EntitySchema, type Snapshot } from '../src/shared/contracts.ts'
 
 // Real exact-read behavior; full-text search is unnecessary in this fixture.
 class ExactQuery extends SessionQueryEngine {
+  async readSession(id: SessionId) {
+    if (this.ctx.agents.get(id))
+      throw new Error('session/writer-held: live readers must use the native snapshot')
+    return super.readSession(id)
+  }
   async searchSessions(): Promise<never> {
     throw new Error('not used')
   }
@@ -97,9 +103,15 @@ it('uses the real Harness loop, fresh children, native decisions and transaction
     await ctx.plugin(Spawn, { providerName: 'spawn' })
     await ctx.plugin(UserQuestions)
     let questions = 0
+    let keepDraft = false
     ctx.on('user-questions/request', async (request) => {
       questions++
-      return { answers: request.questions.map((q) => ({ id: q.id, selected: ['按这个方向继续'] })) }
+      return {
+        answers: request.questions.map((q) => ({
+          id: q.id,
+          selected: [keepDraft ? '保留草稿' : '按这个方向继续'],
+        })),
+      }
     })
     const model = new ControlledModel()
     ctx.llm.registerAdapter(['controlled'], model)
@@ -108,10 +120,11 @@ it('uses the real Harness loop, fresh children, native decisions and transaction
       meta: { cwd },
       agentOptions: { provider: 'controlled', model: 'controlled' },
     })
+    const members = [agent.id]
     const registry = {
       resolveByPath: async (path: string) =>
         path === cwd
-          ? { id: 'workspace', path: cwd, title: '测试', sessionIds: [agent.id] }
+          ? { id: 'workspace', path: cwd, title: '测试', sessionIds: members }
           : undefined,
     } as unknown as WorkspaceRegistry
     novels = new WorkspaceNovels(
@@ -138,7 +151,11 @@ it('uses the real Harness loop, fresh children, native decisions and transaction
     }
     const evidence = (a: Agent, quote: string) => [
       {
-        seq: Number(a.session.snapshotEvents().findLast((e) => e.type === 'user/message')!.seq),
+        seq: Number(
+          a.session
+            .snapshotEvents()
+            .findLast((e) => e.type === 'user/message' && e.data.source.kind === 'user')!.seq,
+        ),
         quote,
       },
     ]
@@ -164,6 +181,48 @@ it('uses the real Harness loop, fresh children, native decisions and transaction
       },
     }))
     expect(existsSync(join(cwd, '.mythor'))).toBe(false)
+    const projectProgress = new ProgressService(ctx, novels)
+    const firstExploration = await projectProgress.read(agent)
+    expect(firstExploration.records.some((r) => r.text === '天空中有一座倒悬的城市。')).toBe(true)
+    const question = firstExploration.records.find((r) => r.kind === 'question')!
+    const { agent: second } = await ctx.agents.create({
+      sessionId: SessionId('second-novelist'),
+      meta: { cwd },
+      agentOptions: { provider: 'controlled', model: 'controlled' },
+    })
+    members.push(second.id)
+    registerCreativeTools(second, creative)
+    installNovelContext(second, novels)
+    expect((await projectProgress.read(second)).records).toEqual(firstExploration.records)
+    members.push(SessionId('unavailable-old-session'))
+    const partial = await projectProgress.read(second)
+    expect(partial.unavailableSessions).toEqual(['unavailable-old-session'])
+    expect(partial.records).toEqual(firstExploration.records)
+    members.pop()
+    const input = '是一个不愿相信别人的孩子。'
+    model.root = () => ({
+      name: 'mythor_intake',
+      args: {
+        phase: 'exploring',
+        evidence: [{ quote: input }],
+        fragments: [{ text: '不信任他人的孩子', nature: 'expressed' }],
+        questions: [],
+        answeredQuestionIds: [question.id],
+        reason: '补充画面',
+      },
+    })
+    second.followup(
+      createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: input }] }),
+    )
+    await second.whenIdle()
+    expect(errors).toEqual([])
+    const shared = await projectProgress.read(agent)
+    expect(shared.records.find((r) => r.id === question.id)?.status).toBe('resolved')
+    expect(shared.records.some((r) => r.sources[0].sessionId === String(second.id))).toBe(true)
+    expect(existsSync(join(cwd, '.mythor'))).toBe(false)
+    expect(model.requests.some((r) => JSON.stringify(r).includes('天空中有一座倒悬的城市。'))).toBe(
+      true,
+    )
     await turn('请继续写这个故事。', (a) => ({
       name: 'mythor_intake',
       args: {
@@ -177,6 +236,12 @@ it('uses the real Harness loop, fresh children, native decisions and transaction
     expect(
       existsSync(join(cwd, '.mythor', 'novel.sqlite')),
       JSON.stringify(agent.session.snapshotEvents().slice(-10)),
+    ).toBe(true)
+    expect((await projectProgress.read(second)).records.some((r) => r.text === input)).toBe(true)
+    expect(
+      (await creative.call<Snapshot>(agent, 'snapshot')).creativeRecords?.some(
+        (r) => r.text === input,
+      ),
     ).toBe(true)
     model.childResult = () => ({
       seedNotes: '从城市入口开始',
@@ -523,6 +588,56 @@ it('uses the real Harness loop, fresh children, native decisions and transaction
     expect(
       (await nextService.call<{ text: string }>(resumed, 'export', { format: 'markdown' })).text,
     ).not.toContain('作者的参考笔记')
+    keepDraft = true
+    model.childResult = () => ({
+      seedNotes: '新方向',
+      entities: [
+        EntitySchema.parse({
+          id: 'new-person',
+          kind: 'character',
+          name: '陌生来客',
+          informationStatus: 'hypothesis',
+        }),
+      ],
+      proposals: ['增加陌生来客'],
+      questions: [],
+    })
+    await resumeTurn('加入一个陌生来客。', 'mythor_develop', {
+      intent: '新增角色方向',
+      evidence: [{ quote: '加入一个陌生来客。' }],
+    })
+    const decisionCandidate = (await nextService.call<Snapshot>(resumed, 'snapshot')).changes.find(
+      (c) => c.status === 'pending',
+    )!
+    expect(decisionCandidate).toBeDefined()
+    await resumeTurn('先看看。', 'mythor_decide', { id: decisionCandidate.id })
+    await resumeTurn('我喜欢这个方案。', 'mythor_decide', {
+      id: decisionCandidate.id,
+      evidence: [{ quote: '我喜欢这个方案。' }],
+    })
+    expect(
+      (await nextService.call<Snapshot>(resumed, 'snapshot')).changes.find(
+        (c) => c.id === decisionCandidate.id,
+      )?.status,
+    ).toBe('pending')
+    await resumeTurn('确认采用，但先别提交。', 'mythor_decide', {
+      id: decisionCandidate.id,
+      evidence: [{ quote: '确认采用' }],
+    })
+    expect(
+      (await nextService.call<Snapshot>(resumed, 'snapshot')).changes.find(
+        (c) => c.id === decisionCandidate.id,
+      )?.status,
+    ).toBe('pending')
+    await resumeTurn('确认采用。', 'mythor_decide', {
+      id: decisionCandidate.id,
+      evidence: [{ quote: '确认采用。' }],
+    })
+    const decided = await nextService.call<Snapshot>(resumed, 'snapshot')
+    expect(decided.changes.find((c) => c.id === decisionCandidate.id)?.status).toBe('committed')
+    expect(decided.entities.find((e) => e.id === 'new-person')?.informationStatus).toBe(
+      'hypothesis',
+    )
   } finally {
     await novels?.close()
     await ctx.fiber.dispose()

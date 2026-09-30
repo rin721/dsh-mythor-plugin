@@ -34,3 +34,11 @@ UI：真实浏览器中的表单、审阅、图谱和取消；深浅主题及无
 0.3 的 `tests/creative-loop.spec.ts` 使用 npm 发布的 Harness Agent Loop、SessionQuery、官方 spawn 和原生问答配合可控 LlmAdapter，不导入相邻 checkout 的测试辅助或内部源码。Schema 必须通过官方子集验证，业务执行仍用 Zod 严格校验。
 
 设计、实现、验证分别列出。发布前运行 typecheck、单元/集成测试、build、打包安装检查与真实 Harness UI smoke。缺少运行环境或凭据时报告具体未验证项，不写「全部通过」。
+
+## 工作区投影边界
+
+新增展示 DTO 位于 shared/progress.ts；ProgressService 只读真源，不能接受数据库路径或小说 ID。UI 仅通过应用请求及官方组件适配层工作；Composer 使用宿主 captureInsertion/insertText，不替换已有草稿、不自动发送。插入失败保留文本供重试。
+
+创作记录采用现有 v3 meta 的类型化条目，配套 ChangeSet、逆操作和备份白名单；旧备份缺少记录时保持可读，不虚构来源或授权。未知新版仍拒写。扩展操作必须同步核验来源、补偿与备份测试。
+
+活动会话有独占写句柄时，不通过 SessionQuery 对同一会话再次打开冷读取；使用宿主现有 Session 的只读快照。已关闭会话使用公开 SessionQuery。测试环境不得和正式 Harness 共享 DSH_HOME，否则会话写句柄相互冲突。

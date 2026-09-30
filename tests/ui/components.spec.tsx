@@ -227,7 +227,9 @@ describe('Harness component adapters', () => {
       container.querySelector('input[type=file]') as HTMLInputElement,
       new File(['Text'], 'story.txt'),
     )
-    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('Read failed'))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('已有内容仍保留'))
+    await user.click(screen.getByRole('button', { name: '查看详细信息' }))
+    expect(screen.getByRole('alert').textContent).toContain('Read failed')
     expect(screen.getByRole('button', { name: 'Read file' }).hasAttribute('disabled')).toBe(false)
   })
 })

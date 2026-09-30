@@ -8,9 +8,7 @@ import {
   type Entity,
   type Finding,
   type Json,
-  type NovelState,
   type Operation,
-  type StorySeed,
   type Relation,
   type Request,
   type Snapshot,
@@ -21,6 +19,7 @@ import { cx } from './layout.ts'
 import { mountStyles } from './styles.ts'
 import {
   Feedback,
+  Menu,
   FeedbackScope,
   TextDiff,
   Tag,
@@ -45,13 +44,16 @@ import {
   TextArea,
 } from './ui/index.tsx'
 import { zh, type Key, type Translate } from './locales.ts'
+import { CreativeWorkspace } from './CreativeWorkspace.tsx'
+import type { WorkspaceProgress } from '../shared/progress.ts'
+import { userError } from './errors.ts'
 export type Api = (request: Request) => Promise<ApiResult>
 class ApiFailure extends Error {
   constructor(
     readonly code: string,
-    message: string,
+    readonly diagnostic: string,
   ) {
-    super(message)
+    super(userError(code))
   }
 }
 const uid = () => crypto.randomUUID()
@@ -153,11 +155,21 @@ export function App({
 }: {
   api: Api
   t?: Translate
-  startConversation?: (text: string) => void
+  startConversation?: (text: string) => boolean | void
   subscribe?: (listener: () => void) => () => void
 }) {
   useLayoutEffect(mountStyles, [])
   const [enabled, setEnabled] = useState(false)
+  const [progress, setProgress] = useState<WorkspaceProgress>()
+  const [moreOpen, setMoreOpen] = useState(false)
+  const [diagnostic, setDiagnostic] = useState('')
+  const [insertion, setInsertion] = useState('')
+  const discuss = startConversation
+    ? (text: string) => {
+        if (startConversation(text) === false) setInsertion(text)
+        else setInsertion('')
+      }
+    : undefined
   const [workspaceAvailable, setWorkspaceAvailable] = useState(true)
   const [snapshot, setSnapshot] = useState<Snapshot>()
   const [tab, setTab] = useState<Key>('overview')
@@ -165,7 +177,15 @@ export function App({
   const [notice, setNotice] = useState('')
   const [error, setError] = useState(false)
   const [modal, setModal] = useState<
-    'enable' | 'legacy' | 'entity' | 'import' | 'relation' | 'task' | 'grant' | 'source' | undefined
+    | 'maintenance'
+    | 'legacy'
+    | 'entity'
+    | 'import'
+    | 'relation'
+    | 'task'
+    | 'grant'
+    | 'source'
+    | undefined
   >()
   const [selected, setSelected] = useState('')
   const [evidence, setEvidence] = useState<{
@@ -245,7 +265,7 @@ export function App({
         setDraftReady(true)
       })
       .catch(() => {
-        if (live) setNotice('会话草稿暂时无法读取；当前输入仍保留，请重试连接。')
+        if (live) setNotice(t('workspaceDraftReadFailed'))
       })
     return () => {
       live = false
@@ -264,7 +284,7 @@ export function App({
           if (!result.ok) throw new Error(result.error.message)
         })
         .catch(() => {
-          if (api === apiRef.current) setNotice('会话草稿暂时无法保存；当前输入仍保留。')
+          if (api === apiRef.current) setNotice(t('workspaceDraftSaveFailed'))
         })
     }
     const timer = setTimeout(save, 400)
@@ -290,17 +310,22 @@ export function App({
     try {
       status = await call<{ enabled: boolean }>('novel.status')
     } catch (failure) {
+      if (api !== apiRef.current) return
       if (failure instanceof ApiFailure && failure.code === 'workspace-unavailable') {
         setWorkspaceAvailable(false)
         setEnabled(false)
         setSnapshot(undefined)
         setHistory([])
+        setProgress(undefined)
         return
       }
       throw failure
     }
-    setWorkspaceAvailable(true)
     if (api !== apiRef.current) return
+    setWorkspaceAvailable(true)
+    const nextProgress = await call<WorkspaceProgress>('workspace.progress')
+    if (api !== apiRef.current) return
+    setProgress(nextProgress)
     setEnabled(status.enabled)
     if (!status.enabled) {
       setSnapshot(undefined)
@@ -315,18 +340,24 @@ export function App({
     setSnapshot(nextSnapshot)
     setHistory(nextHistory)
   }
-  async function act(work: () => Promise<void>, success = true) {
-    setBusy(true)
-    setNotice('')
-    setError(false)
+  async function act(work: () => Promise<void>, success = true, background = false) {
+    const owner = api
+    if (!background) {
+      setBusy(true)
+      setDiagnostic('')
+      setNotice('')
+      setError(false)
+    }
     try {
       await work()
-      if (success) setNotice(t('success'))
+      if (success && owner === apiRef.current) setNotice(t('success'))
     } catch (e) {
+      if (owner !== apiRef.current) return
       setError(true)
-      setNotice(e instanceof Error ? e.message : String(e))
+      setDiagnostic(e instanceof ApiFailure ? e.diagnostic : String(e))
+      setNotice(e instanceof ApiFailure ? e.message : userError('unknown'))
     } finally {
-      setBusy(false)
+      if (!background && owner === apiRef.current) setBusy(false)
     }
   }
   function closeModal() {
@@ -335,9 +366,45 @@ export function App({
     setError(false)
   }
   useEffect(() => {
+    setProgress(undefined)
+    setSnapshot(undefined)
+    setHistory([])
+    setSelected('')
+    setEnabled(false)
+    setTab('overview')
+    setDocumentId('')
+    setDocTitle('')
+    setDocText('')
+    setDocEntity('')
+    setModal(undefined)
+    setInsertion('')
     void act(() => refresh(), false)
   }, [api])
-  useEffect(() => subscribe?.(() => void act(() => refresh(), false)), [subscribe])
+  useEffect(() => {
+    let disposed = false,
+      running = false,
+      queued = false
+    const update = async () => {
+      queued = true
+      if (running) return
+      running = true
+      try {
+        while (queued && !disposed) {
+          queued = false
+          await act(() => refresh(), false, true)
+        }
+      } finally {
+        running = false
+      }
+    }
+    const unsubscribe = subscribe?.(() => {
+      void update()
+    })
+    return () => {
+      disposed = true
+      unsubscribe?.()
+    }
+  }, [subscribe, api])
   useEffect(() => {
     if (enabled && tab === 'graph') void loadGraph()
   }, [enabled, tab, graphMode, graphFocus, graphDepth, graphTime, snapshot?.novel.revision])
@@ -385,18 +452,20 @@ export function App({
       crossings: ['advances', 'part_of'],
     }
     try {
-      setGraphData(
-        await call('graph', {
-          ...(graphFocus ? { focus: graphFocus } : {}),
-          depth: graphDepth,
-          kinds: modes[graphMode] ?? [],
-          ...(graphTime === '' ? {} : { time: Number(graphTime) }),
-        }),
-      )
+      const graph = await call<typeof graphData>('graph', {
+        ...(graphFocus ? { focus: graphFocus } : {}),
+        depth: graphDepth,
+        kinds: modes[graphMode] ?? [],
+        ...(graphTime === '' ? {} : { time: Number(graphTime) }),
+      })
+      if (api !== apiRef.current) return
+      setGraphData(graph)
       setRoute(undefined)
     } catch (e) {
+      if (api !== apiRef.current) return
       setError(true)
-      setNotice(String(e))
+      setDiagnostic(e instanceof ApiFailure ? e.diagnostic : String(e))
+      setNotice(e instanceof ApiFailure ? e.message : userError('unknown'))
     }
   }
   function openEntity(value?: Entity) {
@@ -414,18 +483,30 @@ export function App({
             <Tag>{t(entity.informationStatus)}</Tag>
             {entity.stale && <Tag tone="danger">{t('stale')}</Tag>}
           </div>
-          <Button onClick={() => openEntity(entity)}>{t('edit')}</Button>
-          {Object.entries(entity.attributes).map(([key, value]) => (
-            <p key={key}>
-              <b>
-                {fields[entity.kind]?.find((f) => f[0] === key)
-                  ? t(fields[entity.kind]!.find((f) => f[0] === key)![1])
-                  : key}
-              </b>
-              <br />
-              {typeof value === 'string' ? value : JSON.stringify(value)}
-            </p>
-          ))}
+          {startConversation && (
+            <Button
+              variant="ghost"
+              onClick={() => discuss?.(t('workspaceDiscussEntity').replace('{name}', entity.name))}
+            >
+              和 Mythor 讨论修改
+            </Button>
+          )}
+          <Disclosure title={t('workspaceStructuredEditing')}>
+            <Button onClick={() => openEntity(entity)}>{t('edit')}</Button>
+          </Disclosure>
+          <Disclosure title={t('workspaceExploreAndEditDetails')}>
+            {Object.entries(entity.attributes).map(([key, value]) => (
+              <p key={key}>
+                <b>
+                  {fields[entity.kind]?.find((f) => f[0] === key)
+                    ? t(fields[entity.kind]!.find((f) => f[0] === key)![1])
+                    : key}
+                </b>
+                <br />
+                {typeof value === 'string' ? value : JSON.stringify(value)}
+              </p>
+            ))}
+          </Disclosure>
           <h3 className={cx('heading3')}>{t('sources')}</h3>
           {entity.sources.map((s, i) => (
             <Button
@@ -447,7 +528,6 @@ export function App({
                 : ''}
             </Button>
           ))}
-          <p className={cx('muted small')}>ID {entity.id}</p>
         </>
       ) : (
         <p className={cx('muted')}>{t('noSelection')}</p>
@@ -455,27 +535,91 @@ export function App({
     </aside>
   )
   return (
-    <FeedbackScope error={error ? notice : ''}>
+    <FeedbackScope error={error ? notice : ''} details={diagnostic}>
       <div className={cx('mythor')}>
-        <header className={cx('header')}>
-          <div>
-            <h1 className={cx('heading1')}>
-              {t('title')}{' '}
-              <span className={cx('muted small')}>
-                / {snapshot?.novel.title ?? '当前 Harness 项目'}
-              </span>
-            </h1>
-            <span className={cx('muted')}>{t('subtitle')}</span>
-          </div>
+        <header className={cx('workspaceHeader')}>
+          <nav className={cx('row')} aria-label={t('workspaceNovelWorkspace')}>
+            {(
+              [
+                ['overview', t('workspaceCreate')],
+                ['manuscript', t('workspaceProse')],
+                ['world', t('workspaceStoryReference')],
+              ] as const
+            ).map(([key, label]) => (
+              <Button
+                key={key}
+                variant={
+                  (
+                    key === 'world'
+                      ? ['world', 'structure', 'timeline', 'graph'].includes(tab)
+                      : tab === key
+                  )
+                    ? 'primary'
+                    : 'ghost'
+                }
+                aria-current={tab === key ? 'page' : undefined}
+                onClick={() => {
+                  setTab(key)
+                  setKind('')
+                }}
+              >
+                {label}
+              </Button>
+            ))}
+          </nav>
           <div className={cx('row')}>
-            <Button disabled={busy} onClick={() => void act(() => refresh(), false)}>
-              {t('refresh')}
+            <span className={cx('muted small')}>
+              {snapshot?.novel.title ?? t('workspaceAStoryIsTakingShape')}
+            </span>
+            <Button variant="ghost" onClick={() => setModal('import')}>
+              {t('workspaceImportWritingMaterials')}
             </Button>
+            <Menu
+              open={moreOpen}
+              onClose={() => setMoreOpen(false)}
+              anchor={
+                <Button
+                  variant="ghost"
+                  onClick={() => setMoreOpen(!moreOpen)}
+                  aria-expanded={moreOpen}
+                >
+                  {t('workspaceMore')}
+                </Button>
+              }
+              items={[
+                { id: 'checks', label: t('workspaceCheckStoryContinuity'), disabled: !enabled },
+                { id: 'review', label: t('workspaceViewPendingChanges'), disabled: !enabled },
+                { id: 'tasks', label: t('workspaceViewWritingTasks'), disabled: !enabled },
+                { id: 'history', label: t('workspaceViewChangeHistory'), disabled: !enabled },
+                { id: 'maintenance', label: t('workspaceExportBackupsAndCompatibility') },
+                { id: 'refresh', label: t('workspaceReload') },
+              ]}
+              onSelect={(id) => {
+                setMoreOpen(false)
+                if (id === 'maintenance') setModal('maintenance')
+                else if (id === 'refresh') void act(() => refresh(), false)
+                else setTab(id as Key)
+              }}
+            />
           </div>
         </header>
+        {insertion && (
+          <Panel>
+            <p>{t('workspaceTheComposerCouldNotInsertThis')}</p>
+            <SourceText>{insertion}</SourceText>
+            <Button onClick={() => discuss?.(insertion)}>
+              {t('workspaceTryInsertingBelowAgain')}
+            </Button>
+            <Button variant="ghost" onClick={() => setInsertion('')}>
+              {t('workspaceClose')}
+            </Button>
+          </Panel>
+        )}
         {notice && !modal && (
           <Feedback
             text={notice}
+            details={diagnostic}
+            retry={() => void act(() => refresh(), false)}
             error={error}
             onClose={() => setNotice('')}
             closeLabel={t('close')}
@@ -487,136 +631,55 @@ export function App({
               请先在 Harness 中选择或创建一个工作区。Mythor 不会在工作区之外创建小说数据。
             </EmptyState>
           </main>
+        ) : busy && !progress && !snapshot ? (
+          <main className={cx('main')}>
+            <LoadingState>{t('loading')}</LoadingState>
+          </main>
         ) : !enabled ? (
-          <main className={cx('main onboarding')}>
-            <div className={cx('hero')}>
-              <h2 className={cx('heading2')}>{t('help')}</h2>
-              <p>{t('helpText')}</p>
-              <div className={cx('row')}>
-                <Button onClick={() => setModal('import')}>迁入已有材料</Button>
-                {startConversation && (
-                  <Button
-                    onClick={() =>
-                      startConversation(
-                        '我想写一个故事，但还没想完整。请先听我的想法，再用普通语言帮我逐步发展，每次最多问两个问题。',
-                      )
-                    }
-                  >
-                    从一个想法开始
-                  </Button>
-                )}
-                <Button
-                  onClick={() =>
-                    void act(async () => {
-                      setLegacyNovels(await call('legacy.list'))
-                      setModal('legacy')
-                    }, false)
-                  }
-                >
-                  迁入旧版 Mythor 小说
-                </Button>
-                <FilePicker
-                  disabled={busy}
-                  accept=".json"
-                  onFileSelect={(e) => {
-                    const file = e
-                    if (file)
-                      void act(async () => {
-                        await call('restore', { text: await file.text() })
-                        await refresh()
-                      })
-                  }}
-                  label={t('restore')}
-                />
-              </div>
-            </div>
-            <p className={cx('muted')}>
-              直接在对话里说出画面、人物或想法即可。探索时不会创建小说数据；确定继续创作后，Mythor
-              自动保存到当前项目，无需标题或启用命令。
-            </p>
+          <main className={cx('main')}>
+            {tab === 'overview' ? (
+              <CreativeWorkspace t={t} progress={progress} navigate={setTab} discuss={discuss} />
+            ) : (
+              <EmptyState>{t('workspaceYourStoryWillTakeShapeThrough')}</EmptyState>
+            )}
           </main>
         ) : (
           <div className={cx('layout')}>
-            <nav className={cx('navigation')} aria-label={t('title')}>
-              {tabs.map((key) => (
-                <Button
-                  key={key}
-                  onClick={() => {
-                    setTab(key)
-                    setKind('')
-                  }}
-                  variant={tab === key ? 'primary' : 'ghost'}
-                  aria-current={tab === key ? 'page' : undefined}
-                >
-                  {t(key)}
-                  {key === 'review' && pending.length ? ` (${pending.length})` : ''}
-                </Button>
-              ))}
-            </nav>
             <main className={cx('main')}>
               {!snapshot ? (
                 <LoadingState>{t('loading')}</LoadingState>
               ) : (
                 <>
                   {tab === 'overview' && (
-                    <>
-                      <div className={cx('hero')}>
-                        <Tag>
-                          {t('revision')} {snapshot.novel.revision}
-                        </Tag>
-                        <h2 className={cx('heading2')}>{snapshot.novel.title}</h2>
-                        <p>{t('helpText')}</p>
-                        <div className={cx('row')}>
-                          <Button onClick={() => setModal('task')} variant="primary">
-                            {t('newTask')}
-                          </Button>
-                          <Button onClick={() => setModal('import')}>{t('import')}</Button>
-                        </div>
-                      </div>
-                      <div className={cx('cards')}>
-                        {[
-                          ['objects', snapshot.entities.length],
-                          ['scenes', snapshot.entities.filter((e) => e.kind === 'scene').length],
-                          ['pending', pending.length],
-                          [
-                            'tasks',
-                            snapshot.tasks.filter(
-                              (task) => !['completed', 'cancelled'].includes(task.status),
-                            ).length,
-                          ],
-                        ].map(([key, value]) => (
-                          <Panel key={key}>
-                            <div className={cx('muted')}>{t(key as Key)}</div>
-                            <div className={cx('stat')}>{value}</div>
-                          </Panel>
-                        ))}
-                      </div>
-                      <div className={cx('toolbar spaced')}>
+                    <CreativeWorkspace
+                      t={t}
+                      progress={progress}
+                      snapshot={snapshot}
+                      navigate={setTab}
+                      discuss={discuss}
+                    />
+                  )}
+                  {['world', 'structure', 'timeline', 'graph'].includes(tab) && (
+                    <div className={cx('toolbar')}>
+                      {(['world', 'structure', 'timeline', 'graph'] as const).map((key) => (
                         <Button
-                          onClick={() => void act(async () => download(await call('export')))}
+                          key={key}
+                          variant={tab === key ? 'primary' : 'ghost'}
+                          onClick={() => {
+                            setTab(key)
+                            setKind('')
+                          }}
                         >
-                          {t('export')}
+                          {key === 'world'
+                            ? t('workspacePeopleAndWorld')
+                            : key === 'structure'
+                              ? t('workspaceStoryDevelopment')
+                              : key === 'timeline'
+                                ? t('workspaceSequenceOfEvents')
+                                : t('workspaceConnections')}
                         </Button>
-                        <Button
-                          onClick={() => void act(async () => download(await call('backup')))}
-                        >
-                          {t('backup')}
-                        </Button>
-                        <Button
-                          onClick={() =>
-                            void act(async () => {
-                              await call('novel.update', {
-                                status: snapshot.novel.status === 'active' ? 'paused' : 'active',
-                              })
-                              await refresh()
-                            })
-                          }
-                        >
-                          {snapshot.novel.status === 'active' ? '暂停创作' : '继续创作'}
-                        </Button>
-                      </div>
-                      <p className={cx('muted small')}>Novel ID {snapshot.novel.id}</p>
-                    </>
+                      ))}
+                    </div>
                   )}
                   {(tab === 'world' || tab === 'structure') && (
                     <>
@@ -1266,31 +1329,73 @@ export function App({
             </main>
           </div>
         )}
-        {modal === 'enable' && (
-          <EnableForm
-            close={() => setModal(undefined)}
-            busy={busy}
-            submit={(title, seed) =>
-              act(async () => {
-                const novel = await call<NovelState>('novel.enable', { title })
-                if (Object.values(seed).some((value) => value.trim()))
-                  await call('changes.propose', {
-                    baseRevision: novel.revision,
-                    summary: '建立故事种子',
-                    operations: json([{ type: 'seed.put', value: seed }]),
-                  })
-                setModal(undefined)
-                await refresh()
-                if (Object.values(seed).some((value) => value.trim())) setTab('review')
-              })
-            }
-            t={t}
-          />
+        {modal === 'maintenance' && (
+          <Modal
+            title={t('workspaceExportBackupsAndCompatibility')}
+            close={closeModal}
+            closeLabel={t('close')}
+          >
+            <div className={cx('list')}>
+              {enabled && (
+                <div className={cx('row')}>
+                  <Button onClick={() => void act(async () => download(await call('export')))}>
+                    导出作品
+                  </Button>
+                  <Button onClick={() => void act(async () => download(await call('backup')))}>
+                    保存完整备份
+                  </Button>
+                  <Button
+                    onClick={() =>
+                      void act(async () => {
+                        await call('novel.update', {
+                          status: snapshot?.novel.status === 'active' ? 'paused' : 'active',
+                        })
+                        await refresh()
+                      })
+                    }
+                  >
+                    {snapshot?.novel.status === 'active'
+                      ? t('workspacePauseWriting')
+                      : t('workspaceContinueWriting')}
+                  </Button>
+                </div>
+              )}
+              <Button
+                disabled={enabled}
+                onClick={() =>
+                  void act(async () => {
+                    setLegacyNovels(await call('legacy.list'))
+                    setModal('legacy')
+                  }, false)
+                }
+              >
+                {t('workspaceImportALegacyMythorNovel')}
+              </Button>
+              <FilePicker
+                disabled={busy || enabled}
+                accept=".json"
+                label={t('workspaceRestoreBackup')}
+                onFileSelect={(file) => {
+                  if (file)
+                    void act(async () => {
+                      await call('restore', { text: await file.text() })
+                      await refresh()
+                      closeModal()
+                    })
+                }}
+              />
+              <p className={cx('muted small')}>{t('workspaceMigrateOnlyEmpty')}</p>
+            </div>
+          </Modal>
         )}
         {modal === 'legacy' && (
-          <Modal title="迁入旧版 Mythor 小说" close={closeModal} closeLabel={t('close')}>
+          <Modal
+            title={t('workspaceImportALegacyMythorNovel')}
+            close={closeModal}
+            closeLabel={t('close')}
+          >
             {legacyNovels.length === 0 ? (
-              <EmptyState>没有发现旧版 Mythor 小说。</EmptyState>
+              <EmptyState>{t('workspaceNoLegacy')}</EmptyState>
             ) : (
               <div className={cx('list')}>
                 {legacyNovels.map((legacy) => (
@@ -1439,74 +1544,6 @@ function FindingList({ findings }: { findings: Finding[] }) {
         </Panel>
       ))}
     </div>
-  )
-}
-function EnableForm({
-  submit,
-  close,
-  busy,
-  t,
-}: {
-  submit: (title: string, seed: StorySeed) => Promise<void>
-  close: () => void
-  busy: boolean
-  t: Translate
-}) {
-  const [title, setTitle] = useState('')
-  const [details, setDetails] = useState(false)
-  const [seed, setSeed] = useState<StorySeed>({
-    worldRule: '',
-    protagonist: '',
-    desire: '',
-    obstacle: '',
-    stakes: '',
-    centralQuestion: '',
-    notes: '',
-  })
-  const fields: [keyof StorySeed, string][] = [
-    ['worldRule', '世界规则'],
-    ['protagonist', '主角'],
-    ['desire', '欲望'],
-    ['obstacle', '阻碍'],
-    ['stakes', '失败代价'],
-    ['centralQuestion', '核心未知'],
-    ['notes', '其他想法'],
-  ]
-  return (
-    <Modal title="在当前 Harness 项目启用 Mythor" close={close} closeLabel={t('close')}>
-      <Field>
-        作品标题
-        <Input
-          data-modal-autofocus
-          value={title}
-          onChange={(event) => setTitle(event.target.value)}
-        />
-      </Field>
-      <Checkbox checked={details} onChange={setDetails} label="我已经有明确想法" />
-      {details &&
-        fields.map(([key, label]) => (
-          <Field key={key}>
-            {label}
-            <TextArea
-              value={seed[key]}
-              onChange={(event) => setSeed({ ...seed, [key]: event.target.value })}
-            />
-          </Field>
-        ))}
-      <p className={cx('muted small')}>
-        种子字段都可以留空；已填写内容会先形成候选，经过审阅后才进入正式版本。
-      </p>
-      <FormActions>
-        <Button onClick={close}>{t('cancel')}</Button>
-        <Button
-          variant="primary"
-          disabled={busy || !title.trim()}
-          onClick={() => void submit(title.trim(), seed)}
-        >
-          启用
-        </Button>
-      </FormActions>
-    </Modal>
   )
 }
 function SimpleForm({

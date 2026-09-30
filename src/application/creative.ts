@@ -9,6 +9,8 @@ import { z } from 'zod'
 import { randomUUID } from 'node:crypto'
 import { WorkspaceNovels } from './workspaces.ts'
 import { interviewState } from './interview.ts'
+import { readCreativeSession } from './session-read.ts'
+import { ProgressService } from './progress.ts'
 import { changeHash } from '../domain/continuity.ts'
 import { impacted } from '../domain/validation.ts'
 import { harnessObjectSchema } from '../shared/harness-schema.ts'
@@ -44,6 +46,12 @@ declare module '@deepseek-ai/dsh-session' {
   interface SessionEventMap {
     'mythor/intake': z.infer<typeof IntakeSchema>
     'mythor/decision': { id: string; hash: string; answer: Json }
+    'mythor/decision-presentation': {
+      id: string
+      hash: string
+      baseRevision: number
+      summary: string
+    }
   }
 }
 const json = (v: unknown): Json => JSON.parse(JSON.stringify(v)) as Json
@@ -79,7 +87,19 @@ export function verifyExtraction(
           throw new Error('inference-as-fact: 推断不能升级为事实')
   }
   for (const op of extraction.operations) {
-    if (op.type === 'seed.put' || op.type.startsWith('document.'))
+    if (op.type === 'relation.put') {
+      const evidence = extraction.coverage.filter((c) => c.operationIds.includes(op.value.id))
+      op.value.informationStatus = evidence.some(
+        (c) => c.nature === 'inference' || c.nature === 'proposal',
+      )
+        ? 'hypothesis'
+        : 'fact'
+    }
+    if (
+      op.type === 'seed.put' ||
+      op.type.startsWith('document.') ||
+      op.type.startsWith('creative.')
+    )
       throw new Error('extraction-scope: 提取不能另改创作方向或正文')
     const id = 'value' in op ? op.value.id : op.id
     if (!covered.has(id)) throw new Error('extraction-uncovered: 操作未包含在变化覆盖中')
@@ -137,10 +157,7 @@ export class CreativeService {
     }
   }
   async history(agent: Agent) {
-    const query = this.ctx.get('sessionQuery')
-    if (!query)
-      throw new Error('creative-unavailable: Harness SessionQuery 未配置，不能验证作者来源')
-    return query.readSession(agent.id)
+    return readCreativeSession(this.ctx, agent.id, agent.session)
   }
   async authorEvidence(agent: Agent, evidence: z.infer<typeof AuthorEvidenceInput>) {
     const log = await this.history(agent)
@@ -339,13 +356,18 @@ export class CreativeService {
     const progress = interviewState(this.ctx, agent.session)
     agent.session.append('mythor/interview', { ...progress, intakes: [...progress.intakes, input] })
     await this.novels.resolve(agent)
-    if (input.phase !== 'creating') return { phase: input.phase, questions: input.questions }
+    await this.novels.invalidate(agent)
+    if (input.phase !== 'creating') {
+      const status = await this.call<{ enabled: boolean }>(agent, 'novel.status')
+      if (status.enabled && input.phase !== 'discussion') await this.saveExploration(agent)
+      return { phase: input.phase, questions: input.questions }
+    }
     const classification = await this.child(
       agent,
       '判断是否正在持续创作：普通讨论不进入；明确创作推进或后续选案才进入',
       z.object({ creating: z.boolean(), reason: z.string() }).strict(),
       {
-        history: progress.intakes,
+        history: (await new ProgressService(this.ctx, this.novels).exploration(agent)).records,
         authorEvidence: input.evidence,
         recentAuthorInputs: log.events
           .flatMap((e) =>
@@ -369,6 +391,7 @@ export class CreativeService {
     )
     if (!classification.creating) return { phase: 'exploring', reason: classification.reason }
     await this.call(agent, 'novel.enable', { title: '未命名作品' }, { kind: 'author' }, signal)
+    await this.saveExploration(agent)
     const snapshot = await this.call<Snapshot>(agent, 'snapshot')
     const interview = await this.call<{ intakeSeqs?: number[] }>(agent, 'session.state')
     const references = [
@@ -410,7 +433,44 @@ export class CreativeService {
     await this.call(agent, 'changes.commit', { id: change.id, idempotencyKey: change.id }, actor)
     return { phase: 'creating', questions: input.questions, revision: snapshot.novel.revision + 1 }
   }
-  async decide(agent: Agent, id: string, signal: AbortSignal) {
+  async saveExploration(agent: Agent) {
+    const project = await new ProgressService(this.ctx, this.novels).exploration(agent)
+    if (project.unavailableSessions.length)
+      throw new Error(
+        'creative-unavailable: 部分项目会话暂不可读取，探索记录未自动迁入；请恢复来源后重试',
+      )
+    const snapshot = await this.call<Snapshot>(agent, 'snapshot')
+    const existing = new Map(snapshot.creativeRecords?.map((r) => [r.id, r]))
+    const records = project.records.filter(
+      (r) =>
+        !existing.has(r.id) ||
+        (existing.get(r.id)?.status !== 'superseded' && existing.get(r.id)?.status !== r.status),
+    )
+    if (!records.length) return
+    const change = await this.call<ChangeSet>(agent, 'changes.propose', {
+      baseRevision: snapshot.novel.revision,
+      summary: '保存创作想法与待讨论问题',
+      operations: json(records.map((value) => ({ type: 'creative.put', value }))),
+    })
+    const actor: Actor = {
+      kind: 'policy',
+      changeHash: changeHash(change),
+      reason: 'verified-project-exploration',
+    }
+    await this.call(
+      agent,
+      'scene.evidence',
+      { id: change.id, report: json({ sources: records.flatMap((r) => r.sources) }) },
+      actor,
+    )
+    await this.call(agent, 'changes.commit', { id: change.id, idempotencyKey: change.id }, actor)
+  }
+  async decide(
+    agent: Agent,
+    id: string,
+    signal: AbortSignal,
+    evidence?: z.infer<typeof AuthorEvidenceInput>,
+  ) {
     const snapshot = await this.call<Snapshot>(agent, 'snapshot')
     const change = snapshot.changes.find((c) => c.id === id && c.status === 'pending')
     if (!change) throw new Error('change-closed: 候选不存在或已处理')
@@ -420,10 +480,95 @@ export class CreativeService {
     }>(agent, 'changes.validate', { id })
     if (checked.findings.some((f) => f.severity === 'error'))
       return { pending: id, findings: checked.findings, note: '先修复结构错误，不能用确认绕过' }
+    const hash = changeHash(change)
+    if (evidence) {
+      const verified = await this.authorEvidence(agent, evidence)
+      const presentations = verified.log.events.filter(
+        (e) => e.type === 'mythor/decision-presentation',
+      )
+      const presented = presentations.findLast(
+        (e) => e.type === 'mythor/decision-presentation' && e.data.id === id,
+      )
+      const last = presentations.at(-1)
+      const ambiguous = presentations
+        .filter(
+          (e) =>
+            e.type === 'mythor/decision-presentation' &&
+            snapshot.changes.some((c) => c.id === e.data.id && c.status === 'pending'),
+        )
+        .some((e) => e.type === 'mythor/decision-presentation' && e.data.id !== id)
+      const explicit = verified.evidence.every((ref) =>
+        /^(按这个方向继续|采用这个方案|就这么定了|确认采用|确认提交)[。！!\s]*$/.test(
+          ref.quote.trim(),
+        ),
+      )
+      if (
+        !presented ||
+        presented.type !== 'mythor/decision-presentation' ||
+        last !== presented ||
+        ambiguous ||
+        !explicit ||
+        presented.data.hash !== hash ||
+        presented.data.baseRevision !== snapshot.novel.revision ||
+        verified.evidence.some((ref) => ref.seq <= Number(presented.seq))
+      )
+        return {
+          pending: id,
+          note: '确认对象或范围不够明确，请通过原生问答选择；这句话没有批准修改',
+        }
+      // Inspect the whole message, rather than allowing the model to quote a short affirmative fragment.
+      const whole = verified.evidence.every((ref) =>
+        verified.log.events.some(
+          (e) =>
+            e.type === 'user/message' &&
+            Number(e.seq) === ref.seq &&
+            e.data.content
+              .filter((b) => b.type === 'text')
+              .map((b) => b.text)
+              .join('\n')
+              .trim() === ref.quote.trim(),
+        ),
+      )
+      if (!whole) return { pending: id, note: '需确认完整表达，不能截取肯定片段' }
+      const latest = await this.call<Snapshot>(agent, 'snapshot')
+      const candidate = latest.changes.find((c) => c.id === id)
+      if (
+        !candidate ||
+        latest.novel.revision !== change.baseRevision ||
+        changeHash(candidate) !== hash
+      )
+        throw new Error('decision-conflict: 作品已变化，请重新比较')
+      const actor: Actor = { kind: 'policy', changeHash: hash, reason: 'verified-author-decision' }
+      await this.call(
+        agent,
+        'decision.record',
+        {
+          id,
+          revision: change.baseRevision,
+          hash,
+          answer: json({
+            evidence: verified.evidence.map((r) => ({ ...r, sessionId: String(agent.id) })),
+          }),
+        },
+        actor,
+      )
+      return this.call(
+        agent,
+        'changes.commit',
+        { id, idempotencyKey: id, acknowledgeWarnings: true },
+        { kind: 'author' },
+      )
+    }
     const questions = this.ctx.get('userQuestions')
     if (!questions)
       return { pending: id, note: 'Harness 原生问答不可用；候选保留，可在 Mythor 审阅' }
-    const hash = changeHash(change)
+    agent.session.append('mythor/decision-presentation', {
+      id,
+      hash,
+      baseRevision: change.baseRevision,
+      summary: change.summary,
+    })
+    await this.novels.invalidate(agent)
     const answer = await questions.ask({
       agent,
       signal,

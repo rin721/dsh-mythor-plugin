@@ -42,3 +42,11 @@ Harness Workspace 管理目录、项目名称和会话归属，不复制成 Myth
 不把会话、模型凭据或 Harness Agent 状态复制成领域对象。Repository 提供事务和查询；实体详情、图谱、时间线与上下文都读取同一数据源。
 
 0.3 的阶段产物、九类变化覆盖、材料批次和内部接纳凭据详见 [创作闭环契约](11-creative-loop.md)。人物 knowledge.mode 为 known/knows/已知/知道时才允许读取对应真实断言；误信和未知仅提供认知记录，不能借此读取世界真相。原始材料保留独立身份、类别和不可覆盖的修订；来源偏移以 UTF-16 计算。
+
+## 项目创作记录
+
+`CreativeRecord` 保存 expression、preference、interpretation、proposal、hypothesis、question、decision 的性质，以及 open/resolved/superseded 生命周期。来源为 `sessionId + seq + quote`，不同会话序号不共用身份。创作记录与 Canon 分开；提交记录不使其成为世界事实。实体和关系的信息性质分别保留，旧关系未声明性质时不补成已确认。
+
+正式小说前，Harness 持久 Session 事件是探索真源，Host 只回读 WorkspaceRegistry 核验的成员会话中有真实用户消息依据的结构化创作事件，不扫描全部聊天纳入小说。建立小说后，经宿主核验将其迁入项目库，以内容及完整来源稳定身份去重。已关闭问题不会因旧的全状态事件再次出现而重新打开。补偿将创作记录标为 superseded，避免旧日志重新复活；原文和历史仍保留。
+
+Project：事实、规划、正文、候选、创作任务、表达、问题与决定。Session：当前目标引用、编辑草稿、浏览焦点及原生问答交互。瞬时 UI：浮层、悬停、加载。Composer 草稿由 Harness 自行持久化。

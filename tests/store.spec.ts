@@ -635,3 +635,45 @@ describe('backup and source evidence', () => {
     expect(call<{ text: string }>('export').text.startsWith('# 第一章')).toBe(true)
   })
 })
+
+it('keeps creative hypotheses noncanonical through projection, backup and compensation', () => {
+  const record = {
+    id: 'idea_record',
+    kind: 'hypothesis' as const,
+    text: '哥哥也许还活着',
+    status: 'open' as const,
+    sources: [{ sessionId: 'session_a', seq: 7, quote: '如果哥哥还活着呢' }],
+  }
+  const candidate = propose([{ type: 'creative.put', value: record }])
+  expect(() => commit(candidate)).toThrow(/创作来源记录/)
+  const policy: Actor = {
+    kind: 'policy',
+    changeHash: changeHash(candidate),
+    reason: 'verified-project-exploration',
+  }
+  call('scene.evidence', { id: candidate.id, report: { sources: record.sources } }, policy)
+  const accepted = commit(candidate, policy)
+  const before = call<Snapshot>('snapshot')
+  const view = call<{ snapshot: Snapshot }>('workspace.progress')
+  expect(view.snapshot.creativeRecords).toEqual([record])
+  expect(view.snapshot.entities).toHaveLength(0)
+  expect(call<Snapshot>('snapshot').novel.revision).toBe(before.novel.revision)
+  const backup = call<{ text: string }>('backup')
+  const targetRoot = mkdtempSync(join(tmpdir(), 'mythor-creative-backup-'))
+  const restored = new Store(targetRoot)
+  try {
+    restored.execute({ action: 'novel.enable', payload: { title: '恢复' } }, author)
+    restored.execute({ action: 'restore', payload: { text: backup.text } }, author)
+    expect(
+      (restored.execute({ action: 'snapshot', payload: {} }, author) as unknown as Snapshot)
+        .creativeRecords,
+    ).toEqual([record])
+  } finally {
+    restored.close()
+    rmSync(targetRoot, { recursive: true, force: true })
+  }
+  const undo = call<ChangeSet>('history.undo', { id: accepted.id })
+  commit(undo)
+  expect(call<Snapshot>('snapshot').creativeRecords?.[0].status).toBe('superseded')
+  expect(call<Snapshot>('snapshot').entities).toHaveLength(0)
+})

@@ -102,13 +102,18 @@ export function apply(ctx: ClientContext) {
           }: {
             api: Api
             subscribe: (listener: () => void) => () => void
-            inputActions: { setDraft(text: string): void }
+            inputActions: {
+              captureInsertion(): unknown
+              insertText(text: string, span: unknown): boolean
+            }
           }) => (
             <App
               api={api}
               subscribe={subscribe}
               t={t}
-              startConversation={(text) => inputActions.setDraft(text)}
+              startConversation={(text) =>
+                inputActions.insertText(text, inputActions.captureInsertion())
+              }
             />
           ),
         ),

@@ -22,6 +22,7 @@ import {
 } from './shared/contracts.ts'
 import { ROLE_GUIDANCE } from './domain/workflows.ts'
 import { CreativeService } from './application/creative.ts'
+import { ProgressService } from './application/progress.ts'
 import { interviewState, registerInterview } from './application/interview.ts'
 import { CREATIVE_GUIDANCE } from './shared/creative.ts'
 import { registerCreativeTools } from './application/agent-tools.ts'
@@ -37,7 +38,7 @@ declare module '@deepseek-ai/dsh-llm' {
     'mythor-task': { kind: 'mythor-task' }
   }
 }
-export const inject = ['tools', 'commands', 'typert', 'workspaceRegistry']
+export const inject = ['agents', 'tools', 'commands', 'typert', 'workspaceRegistry']
 export interface Config {
   /** Retained only as the read-only source for explicit legacy migration. */
   dataDirectory: string
@@ -96,6 +97,14 @@ export class MythorRemote extends TypertRemoteService {
   @Remote
   async request(agent: Agent, request: Request, signal: AbortSignal): Promise<ApiResult> {
     const parsed = RequestSchema.parse(request)
+    if (parsed.action === 'workspace.progress') {
+      try {
+        const value = await new ProgressService(this.ctx, this.novels).read(agent)
+        return { ok: true, value: JSON.parse(JSON.stringify(value)) }
+      } catch (error) {
+        return { ok: false, error: { code: 'progress-unavailable', message: String(error) } }
+      }
+    }
     const result = await this.novels.request(agent, parsed, { kind: 'author' }, signal)
     if (!result.ok) return result
     if (['novel.enable', 'restore', 'legacy.migrate'].includes(parsed.action))
@@ -288,6 +297,26 @@ function registerTools(ctx: Context, novels: WorkspaceNovels, remote: MythorRemo
 
 export function installNovelContext(agent: Agent, novels: WorkspaceNovels) {
   return agent.ctx.on('system-prompt/assemble', async (assembly, context, next) => {
+    try {
+      const progress = await new ProgressService(agent.ctx, novels).read(agent)
+      assembly.contexts.push({
+        name: 'mythor:project-progress',
+        text: JSON.stringify({
+          records: progress.records,
+          plans: progress.plans.map((p) => ({ id: p.id, name: p.name, attributes: p.attributes })),
+          pending: progress.pending,
+          decisions: progress.decisions,
+          truncated: progress.truncated,
+          unavailableSessions: progress.unavailableSessions,
+          revision: progress.revision,
+        }),
+      })
+    } catch {
+      assembly.contexts.push({
+        name: 'mythor:project-progress',
+        text: '项目级创作记录暂不可读取。不要声称已恢复全部方向或确认历史决定；需要长期依据的操作先恢复读取。',
+      })
+    }
     const projections = agent.ctx.get('sessionProjections')
     if (projections) {
       const progress = interviewState(agent.ctx, agent.session)
@@ -372,6 +401,9 @@ export function apply(ctx: Context, config: Config): void {
     return undefined
   })
   ctx.on('agent/error', ({ agent, error }) => void remote.failed(agent, error))
+  ctx.on('agent/status', ({ agent }) => {
+    void novels.invalidate(agent).catch(() => {})
+  })
   for (const agent of ctx.agents?.roots() ?? []) void installFor(agent)
   ctx.effect(() => () => novels.close())
   // register() already owns a Cordis effect. Register it directly so the

@@ -20,8 +20,21 @@ import type { Translate } from '../locales.ts'
 import css from './ui.module.css'
 
 const FeedbackContext = createContext('')
-export function FeedbackScope({ error, children }: { error: string; children: ReactNode }) {
-  return <FeedbackContext.Provider value={error}>{children}</FeedbackContext.Provider>
+const DiagnosticContext = createContext('')
+export function FeedbackScope({
+  error,
+  details = '',
+  children,
+}: {
+  error: string
+  details?: string
+  children: ReactNode
+}) {
+  return (
+    <DiagnosticContext.Provider value={details}>
+      <FeedbackContext.Provider value={error}>{children}</FeedbackContext.Provider>
+    </DiagnosticContext.Provider>
+  )
 }
 
 export {
@@ -218,6 +231,7 @@ export function Modal({
   children: ReactNode
 }) {
   const error = useContext(FeedbackContext)
+  const details = useContext(DiagnosticContext)
   return (
     <HarnessModal
       open
@@ -228,6 +242,11 @@ export function Modal({
       contentClassName={css.dialogContent}
     >
       {error && <ErrorState>{error}</ErrorState>}
+      {error && details && (
+        <Disclosure title="查看详细信息">
+          <SourceText>{details}</SourceText>
+        </Disclosure>
+      )}
       {children}
     </HarnessModal>
   )
@@ -275,10 +294,22 @@ export function LoadingState({ children }: { children: ReactNode }) {
   )
 }
 export function ErrorState({ children }: { children: ReactNode }) {
+  const technical =
+    typeof children === 'string' &&
+    /gateway\/|transport|HTTP \d|unrecognized_keys|typert|Error:|[a-z]+-[a-z]+:/.test(children)
   return (
     <div className={css.feedback} role="alert">
       <StateDot state="error" />
-      {children}
+      {technical ? (
+        <div>
+          这项操作暂时无法完成，已有内容仍保留。
+          <Disclosure title="查看详细信息">
+            <SourceText>{children}</SourceText>
+          </Disclosure>
+        </div>
+      ) : (
+        children
+      )}
     </div>
   )
 }
@@ -288,11 +319,15 @@ export function SourceText({ children }: { children: ReactNode }) {
 export function Feedback({
   text,
   error,
+  details,
+  retry,
   onClose,
   closeLabel,
 }: {
   text: string
   error: boolean
+  details?: string
+  retry?: () => void
   onClose: () => void
   closeLabel: string
 }) {
@@ -301,6 +336,12 @@ export function Feedback({
     <div className={clsx(css.feedback, css.feedbackError)} role="alert">
       <StateDot state="error" />
       <span>{text}</span>
+      {retry && <Button onClick={retry}>重试</Button>}
+      {details && (
+        <Disclosure title="查看详细信息">
+          <SourceText>{details}</SourceText>
+        </Disclosure>
+      )}
       <Button onClick={onClose}>{closeLabel}</Button>
     </div>
   ) : (

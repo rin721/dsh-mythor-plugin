@@ -6,6 +6,7 @@ import { z } from 'zod'
 import { CritiqueSchema } from '../shared/contracts.ts'
 import {
   ChangeSetSchema,
+  CreativeRecordSchema,
   CommitSchema,
   DEFAULT_LIMITS,
   DocumentSchema,
@@ -154,6 +155,10 @@ export class Store {
   }
   private snapshot(db: DatabaseSync): Snapshot {
     return {
+      creativeRecords: db
+        .prepare("SELECT data FROM meta WHERE id LIKE 'creative:%'")
+        .all()
+        .map((row) => CreativeRecordSchema.parse(decode(row))),
       novel: this.novel(db),
       entities: this.all(db, 'entities'),
       relations: this.all(db, 'relations'),
@@ -217,10 +222,48 @@ export class Store {
     const novel = this.novel(db)
     if (
       novel.status === 'paused' &&
-      !['snapshot', 'query', 'history', 'export', 'backup', 'novel.update'].includes(req.action)
+      ![
+        'snapshot',
+        'workspace.progress',
+        'session.state',
+        'session.save',
+        'query',
+        'history',
+        'export',
+        'backup',
+        'novel.update',
+      ].includes(req.action)
     )
       throw new MythorError('novel-paused', '小说创作已暂停，请先恢复')
     switch (req.action) {
+      case 'workspace.progress': {
+        db.exec('BEGIN')
+        try {
+          const snapshot = this.snapshot(db)
+          const result = safeJson({
+            snapshot,
+            history: this.all<Commit>(db, 'commits'),
+            decisions: snapshot.changes
+              .filter((c) => c.status === 'pending')
+              .flatMap((c) => {
+                const receipt = this.meta(db, `coordination:${c.id}`)
+                const report =
+                  receipt?.hash === changeHash(c)
+                    ? (receipt.report as Record<string, Json> | undefined)
+                    : undefined
+                return [
+                  ...(Array.isArray(report?.majorDecisions) ? report.majorDecisions : []),
+                  ...(Array.isArray(report?.uncertainties) ? report.uncertainties : []),
+                ].map((text) => ({ id: c.id, text: String(text), baseRevision: c.baseRevision }))
+              }),
+          })
+          db.exec('COMMIT')
+          return result
+        } catch (error) {
+          db.exec('ROLLBACK')
+          throw error
+        }
+      }
       case 'task.list':
         return safeJson(this.all<WorkflowRun>(db, 'tasks'))
       case 'task.read':
@@ -702,6 +745,15 @@ export class Store {
     db.exec('BEGIN IMMEDIATE')
     try {
       const change = this.get<ChangeSet>(db, 'changes', input.id)
+      if (
+        change.operations.some((op) => op.type.startsWith('creative.')) &&
+        actor.kind !== 'policy' &&
+        !(
+          actor.kind === 'author' &&
+          this.meta(db, `creative-undo:${change.id}`)?.hash === changeHash(change)
+        )
+      )
+        throw new MythorError('host-only', '创作来源记录只能由宿主核验后接纳')
       if (change.status !== 'pending') throw new MythorError('change-closed', '变更已提交或拒绝')
       let task: WorkflowRun | undefined
       if (change.taskId) {
@@ -800,6 +852,24 @@ export class Store {
             )
           } else db.prepare('DELETE FROM documents WHERE id=?').run(id)
           if (old) changedDocuments.add(id)
+        } else if (op.type === 'creative.put' || op.type === 'creative.delete') {
+          const id = 'value' in op ? op.value.id : op.id
+          const old = this.meta(db, `creative:${id}`)
+          inverse.unshift(
+            old
+              ? { type: 'creative.put', value: CreativeRecordSchema.parse(old) }
+              : { type: 'creative.delete', id },
+          )
+          if (op.type === 'creative.put')
+            db.prepare('INSERT OR REPLACE INTO meta VALUES(?,?)').run(
+              `creative:${id}`,
+              stringify(op.value),
+            )
+          else if (old)
+            db.prepare('INSERT OR REPLACE INTO meta VALUES(?,?)').run(
+              `creative:${id}`,
+              stringify({ ...old, status: 'superseded' }),
+            )
         } else {
           inverse.unshift({ type: 'seed.put', value: novel.seed })
         }
@@ -950,7 +1020,7 @@ export class Store {
           }
         : op,
     )
-    return this.propose(
+    const compensation = this.propose(
       db,
       {
         baseRevision: this.novel(db).revision,
@@ -959,6 +1029,11 @@ export class Store {
       },
       { kind: 'author' },
     )
+    db.prepare('INSERT OR REPLACE INTO meta VALUES(?,?)').run(
+      `creative-undo:${compensation.id}`,
+      stringify({ hash: changeHash(compensation) }),
+    )
+    return compensation
   }
   private startTask(db: DatabaseSync, p: Record<string, Json>, actor: Actor): WorkflowRun {
     const input = z
@@ -1516,10 +1591,15 @@ export class Store {
     try {
       this.setNovel(db, novel)
       for (const record of raw.creative) {
-        if (!/^(materials$|session:|document-state:|coordination:|decision:)/.test(record.id))
+        if (
+          !/^(materials$|session:|document-state:|coordination:|decision:|creative:|creative-undo:)/.test(
+            record.id,
+          )
+        )
           throw new MythorError('invalid-backup', '备份包含未知元数据')
         z.json().parse(JSON.parse(record.data))
         if (record.id === 'materials') z.array(MaterialSchema).parse(JSON.parse(record.data))
+        if (record.id.startsWith('creative:')) CreativeRecordSchema.parse(JSON.parse(record.data))
         db.prepare('INSERT OR REPLACE INTO meta VALUES(?,?)').run(record.id, record.data)
       }
       for (const table of TABLES.filter((t) => t !== 'grants'))
